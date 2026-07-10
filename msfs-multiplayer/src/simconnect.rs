@@ -4,11 +4,13 @@ use crate::live::{LatestLocalState, LatestRemoteSnapshot, RenderedAircraftUpdate
 use crate::protocol::{AircraftState, UserId};
 use crate::timeline::{TargetSample, TargetTimeline};
 use msfs_sync::{
-    AiAircraft, InitialPosition, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect,
+    AiAircraft, Error, InitialPosition, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect,
     Subscription, SubscriptionOptions, data_definition,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
+use std::io;
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 #[data_definition]
@@ -99,6 +101,38 @@ struct RemoteAircraftData {
 
 #[data_definition]
 #[derive(Debug)]
+struct RemoteAircraftPlacement {
+    #[name = "PLANE LATITUDE"]
+    #[unit = "Degrees"]
+    latitude: f64,
+    #[name = "PLANE LONGITUDE"]
+    #[unit = "Degrees"]
+    longitude: f64,
+    #[name = "PLANE ALTITUDE"]
+    #[unit = "Feet"]
+    altitude: f64,
+    #[name = "PLANE HEADING DEGREES TRUE"]
+    #[unit = "Degrees"]
+    heading: f64,
+    #[name = "PLANE PITCH DEGREES"]
+    #[unit = "Degrees"]
+    pitch: f64,
+    #[name = "PLANE BANK DEGREES"]
+    #[unit = "Degrees"]
+    bank: f64,
+    #[name = "VELOCITY BODY X"]
+    #[unit = "Feet per second"]
+    velocity_body_x: f64,
+    #[name = "VELOCITY BODY Y"]
+    #[unit = "Feet per second"]
+    velocity_body_y: f64,
+    #[name = "VELOCITY BODY Z"]
+    #[unit = "Feet per second"]
+    velocity_body_z: f64,
+}
+
+#[data_definition]
+#[derive(Debug)]
 struct RemoteAircraftPosition {
     #[name = "ABSOLUTE TIME"]
     #[unit = "Seconds"]
@@ -121,6 +155,92 @@ struct RemoteAircraft {
     pending_actual: Option<RemoteAircraftPosition>,
 }
 
+struct CreationRequest {
+    user_id: UserId,
+    initial_position: InitialPosition,
+}
+
+struct CreationCompletion {
+    user_id: UserId,
+    result: Result<Option<AiAircraft>, Error>,
+}
+
+struct CreationWorker {
+    requests: mpsc::SyncSender<CreationRequest>,
+    completions: mpsc::Receiver<CreationCompletion>,
+    desired_users: Arc<Mutex<HashSet<UserId>>>,
+}
+
+struct RemoteFleet {
+    aircraft: HashMap<UserId, RemoteAircraft>,
+    awaiting_alignment: HashMap<UserId, AiAircraft>,
+    pending_creations: HashSet<UserId>,
+    desired_users: HashSet<UserId>,
+    creation_worker: CreationWorker,
+}
+
+impl CreationWorker {
+    fn spawn(sim: SimConnect, model_title: String) -> Result<Self, io::Error> {
+        let (request_tx, request_rx) = mpsc::sync_channel::<CreationRequest>(1);
+        let (completion_tx, completion_rx) = mpsc::channel::<CreationCompletion>();
+        let desired_users = Arc::new(Mutex::new(HashSet::<UserId>::new()));
+        let worker_desired_users = Arc::clone(&desired_users);
+        std::thread::Builder::new()
+            .name("msfs-multiplayer-create".to_owned())
+            .spawn(move || {
+                while let Ok(request) = request_rx.recv() {
+                    let desired = worker_desired_users
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .contains(&request.user_id);
+                    let result = if desired {
+                        sim.create_non_atc_aircraft(
+                            &model_title,
+                            format!("FSMP{}", request.user_id),
+                            request.initial_position,
+                        )
+                        .map(Some)
+                    } else {
+                        Ok(None)
+                    };
+                    let completion = CreationCompletion {
+                        user_id: request.user_id,
+                        result,
+                    };
+                    if let Err(error) = completion_tx.send(completion) {
+                        if let Ok(Some(aircraft)) = error.0.result {
+                            let _ = sim.remove_object(aircraft.object_id());
+                        }
+                        break;
+                    }
+                }
+            })?;
+        Ok(Self {
+            requests: request_tx,
+            completions: completion_rx,
+            desired_users,
+        })
+    }
+
+    fn set_desired_users(&self, users: &HashSet<UserId>) {
+        *self
+            .desired_users
+            .lock()
+            .unwrap_or_else(|error| error.into_inner()) = users.clone();
+    }
+
+    fn try_queue(&self, request: CreationRequest) -> Result<bool, io::Error> {
+        match self.requests.try_send(request) {
+            Ok(()) => Ok(true),
+            Err(mpsc::TrySendError::Full(_)) => Ok(false),
+            Err(mpsc::TrySendError::Disconnected(_)) => Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "remote aircraft creation worker stopped",
+            )),
+        }
+    }
+}
+
 pub fn run(
     model_title: &str,
     local_state: LatestLocalState,
@@ -132,7 +252,13 @@ pub fn run(
         SubscriptionOptions::new(RecurringPeriod::SimFrame).latest(),
     )?;
     let mut exceptions = sim.exceptions()?;
-    let mut aircraft = HashMap::<UserId, RemoteAircraft>::new();
+    let mut fleet = RemoteFleet {
+        aircraft: HashMap::new(),
+        awaiting_alignment: HashMap::new(),
+        pending_creations: HashSet::new(),
+        desired_users: HashSet::new(),
+        creation_worker: CreationWorker::spawn(sim.clone(), model_title.to_owned())?,
+    };
     let mut receiver_absolute_time = None;
 
     loop {
@@ -154,14 +280,9 @@ pub fn run(
             .unwrap_or_else(|error| error.into_inner())
             .take();
         if let Some(snapshot) = snapshot {
-            reconcile(
-                &sim,
-                model_title,
-                &mut aircraft,
-                &snapshot,
-                receiver_absolute_time,
-            )?;
+            reconcile(&sim, &mut fleet, &snapshot, receiver_absolute_time)?;
         }
+        collect_creation_completions(&sim, &mut fleet)?;
 
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -169,8 +290,7 @@ pub fn run(
 
 fn reconcile(
     sim: &SimConnect,
-    model_title: &str,
-    aircraft: &mut HashMap<UserId, RemoteAircraft>,
+    fleet: &mut RemoteFleet,
     snapshot: &[RenderedAircraftUpdate],
     receiver_absolute_time: Option<f64>,
 ) -> Result<(), DynError> {
@@ -178,28 +298,28 @@ fn reconcile(
         .iter()
         .map(|update| update.user_id)
         .collect::<HashSet<_>>();
+    fleet.desired_users = present.clone();
+    fleet.creation_worker.set_desired_users(&present);
 
     for update in snapshot {
         if !update.state.is_finite() {
             continue;
         }
-        if !aircraft.contains_key(&update.user_id) {
-            let created = sim.create_non_atc_aircraft(
-                model_title,
-                format!("FSMP{}", update.user_id),
-                initial_position(update.state),
-            )?;
-            sim.release_ai_control(created.object_id())?;
+        if receiver_absolute_time.is_some()
+            && let Some(created) = fleet.awaiting_alignment.remove(&update.user_id)
+        {
+            let object_id = created.object_id();
+            sim.release_ai_control(object_id)?;
+            sim.set_data_on_sim_object(object_id, &RemoteAircraftPlacement::from(update.state))?;
             let drift_updates = sim.subscribe_with_options::<RemoteAircraftPosition>(
-                created.object_id(),
+                object_id,
                 SubscriptionOptions::new(RecurringPeriod::Second).latest(),
             )?;
             eprintln!(
-                "Created remote user {} as object {}.",
-                update.user_id,
-                created.object_id()
+                "Aligned remote user {} as object {} at playback {:.3}s.",
+                update.user_id, object_id, update.playback_timestamp_seconds,
             );
-            aircraft.insert(
+            fleet.aircraft.insert(
                 update.user_id,
                 RemoteAircraft {
                     handle: created,
@@ -210,9 +330,22 @@ fn reconcile(
             );
         }
 
-        let remote = aircraft
+        if !fleet.aircraft.contains_key(&update.user_id) {
+            if !fleet.pending_creations.contains(&update.user_id)
+                && fleet.creation_worker.try_queue(CreationRequest {
+                    user_id: update.user_id,
+                    initial_position: initial_position(update.state),
+                })?
+            {
+                fleet.pending_creations.insert(update.user_id);
+            }
+            continue;
+        }
+
+        let remote = fleet
+            .aircraft
             .get_mut(&update.user_id)
-            .expect("the remote aircraft was just created or already existed");
+            .expect("the remote aircraft was just aligned or already active");
         if let Some(receiver_absolute_time) = receiver_absolute_time {
             let reset = remote.target_history.record(TargetSample {
                 receiver_absolute_time,
@@ -229,20 +362,72 @@ fn reconcile(
         sim.set_data_on_sim_object(object_id, &RemoteAircraftData::from(update.state))?;
     }
 
-    let removed = aircraft
+    let removed = fleet
+        .aircraft
         .keys()
         .copied()
         .filter(|user_id| !present.contains(user_id))
         .collect::<Vec<_>>();
     for user_id in removed {
-        let object = aircraft
+        let object = fleet
+            .aircraft
             .remove(&user_id)
             .expect("the object ID came from this map");
         sim.remove_object(object.handle.object_id())?;
         eprintln!("Removed remote user {user_id}.");
     }
-    log_ready_drifts(aircraft);
+    let unaligned_removed = fleet
+        .awaiting_alignment
+        .keys()
+        .copied()
+        .filter(|user_id| !present.contains(user_id))
+        .collect::<Vec<_>>();
+    for user_id in unaligned_removed {
+        let object = fleet
+            .awaiting_alignment
+            .remove(&user_id)
+            .expect("the object ID came from this map");
+        sim.remove_object(object.object_id())?;
+        eprintln!("Removed unaligned remote user {user_id}.");
+    }
+    log_ready_drifts(&mut fleet.aircraft);
     Ok(())
+}
+
+fn collect_creation_completions(sim: &SimConnect, fleet: &mut RemoteFleet) -> Result<(), DynError> {
+    loop {
+        let completion = match fleet.creation_worker.completions.try_recv() {
+            Ok(completion) => completion,
+            Err(mpsc::TryRecvError::Empty) => return Ok(()),
+            Err(mpsc::TryRecvError::Disconnected) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "remote aircraft creation worker stopped",
+                )
+                .into());
+            }
+        };
+        fleet.pending_creations.remove(&completion.user_id);
+        let Some(created) = completion.result? else {
+            continue;
+        };
+        if fleet.desired_users.contains(&completion.user_id) {
+            eprintln!(
+                "Created remote user {} as object {}; awaiting fresh alignment.",
+                completion.user_id,
+                created.object_id(),
+            );
+            if let Some(replaced) = fleet.awaiting_alignment.insert(completion.user_id, created) {
+                sim.remove_object(replaced.object_id())?;
+            }
+        } else {
+            sim.remove_object(created.object_id())?;
+            eprintln!(
+                "Removed remote user {} created after it disconnected.",
+                completion.user_id,
+            );
+        }
+    }
 }
 
 fn log_ready_drifts(aircraft: &mut HashMap<UserId, RemoteAircraft>) {
@@ -358,6 +543,22 @@ impl From<UserAircraftData> for AircraftState {
 impl From<AircraftState> for RemoteAircraftData {
     fn from(state: AircraftState) -> Self {
         Self {
+            heading: state.heading,
+            pitch: state.pitch,
+            bank: state.bank,
+            velocity_body_x: state.velocity_body_x,
+            velocity_body_y: state.velocity_body_y,
+            velocity_body_z: state.velocity_body_z,
+        }
+    }
+}
+
+impl From<AircraftState> for RemoteAircraftPlacement {
+    fn from(state: AircraftState) -> Self {
+        Self {
+            latitude: state.latitude,
+            longitude: state.longitude,
+            altitude: state.altitude,
             heading: state.heading,
             pitch: state.pitch,
             bank: state.bank,
