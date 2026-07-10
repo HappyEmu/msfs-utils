@@ -7,6 +7,8 @@ The workspace contains:
 
 - `msfs-async`: a runtime-independent async client backed by a dedicated
   Windows event thread, including typed AI-aircraft lifecycle operations;
+- `msfs-multiplayer`: an experimental UDP relay, synchronous SimConnect
+  injector, and replay-driven synthetic client binary;
 - `msfs-sync`: a blocking facade over the same driver;
 - `msfs-async-derive`: validated simulation-object and client-data definition
   macros;

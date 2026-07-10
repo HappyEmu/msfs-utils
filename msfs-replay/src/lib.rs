@@ -16,7 +16,12 @@ pub struct Pose {
 }
 
 impl Pose {
-    fn interpolate(self, other: Self, amount: f64) -> Self {
+    /// Interpolate between two poses.
+    ///
+    /// Position uses linear interpolation with wrapped longitude, while
+    /// attitude uses quaternion spherical interpolation. `amount` is normally
+    /// between zero and one.
+    pub fn interpolate(self, other: Self, amount: f64) -> Self {
         let attitude = Quaternion::from_euler(self.pitch, self.bank, self.heading)
             .slerp(
                 Quaternion::from_euler(other.pitch, other.bank, other.heading),

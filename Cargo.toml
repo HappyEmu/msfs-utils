@@ -1,4 +1,10 @@
 [workspace]
 resolver = "3"
-members = ["msfs-async", "msfs-async-derive", "msfs-replay", "msfs-sync"]
+members = [
+  "msfs-async",
+  "msfs-async-derive",
+  "msfs-multiplayer",
+  "msfs-replay",
+  "msfs-sync",
+]
 exclude = ["checkouts/msfs-rs"]
