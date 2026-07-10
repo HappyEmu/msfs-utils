@@ -1,6 +1,7 @@
 use crate::DynError;
 use crate::protocol::{self, AircraftUpdate, Message, UserId};
 use std::collections::HashMap;
+use std::io;
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
@@ -28,7 +29,11 @@ pub async fn run(bind_address: SocketAddr) -> Result<(), DynError> {
     loop {
         tokio::select! {
             received = socket.recv_from(&mut buffer) => {
-                let (length, address) = received?;
+                let (length, address) = match received {
+                    Ok(packet) => packet,
+                    Err(error) if is_recoverable_udp_error(&error) => continue,
+                    Err(error) => return Err(error.into()),
+                };
                 let Ok(message) = protocol::decode(&buffer[..length]) else {
                     continue;
                 };
@@ -90,11 +95,31 @@ pub async fn run(bind_address: SocketAddr) -> Result<(), DynError> {
                         sequence: snapshot_sequence,
                         aircraft,
                     })?;
-                    socket.send_to(&packet, address).await?;
+                    if let Err(error) = socket.send_to(&packet, address).await {
+                        if is_recoverable_udp_error(&error) {
+                            clients.remove(&address);
+                            eprintln!(
+                                "Removed unreachable multiplayer user {recipient_id} at {address}."
+                            );
+                            continue;
+                        }
+                        return Err(error.into());
+                    }
                 }
             }
         }
     }
+}
+
+fn is_recoverable_udp_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::HostUnreachable
+            | io::ErrorKind::NetworkUnreachable
+            | io::ErrorKind::Interrupted
+    )
 }
 
 fn accept_update(client: &mut ClientState, update: AircraftUpdate, now: Instant) -> bool {
@@ -173,5 +198,22 @@ mod tests {
         };
         assert!(!accept_update(&mut client, wrong_user, now));
         assert_eq!(client.update.unwrap().sequence, 10);
+    }
+
+    #[test]
+    fn peer_disconnect_udp_errors_do_not_stop_the_relay() {
+        for kind in [
+            io::ErrorKind::ConnectionReset,
+            io::ErrorKind::ConnectionRefused,
+            io::ErrorKind::HostUnreachable,
+            io::ErrorKind::NetworkUnreachable,
+            io::ErrorKind::Interrupted,
+        ] {
+            assert!(is_recoverable_udp_error(&io::Error::from(kind)));
+        }
+
+        assert!(!is_recoverable_udp_error(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
     }
 }
