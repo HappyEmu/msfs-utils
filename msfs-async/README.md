@@ -116,12 +116,12 @@ Start MSFS and fully load a flight, then run the suite serially:
 cargo test -p msfs-async --test live_simconnect -- --ignored --test-threads=1 --nocapture
 ```
 
-Normal `cargo test` runs skip these tests. The AI lifecycle test defaults to
-`Airbus A320 Neo Asobo`. Override it with another exact installed container
-title when necessary:
+Normal `cargo test` runs skip these tests. The AI lifecycle test defaults to the
+MSFS 2024 container title `A320neo V2`. Override it with another exact installed
+container title when necessary:
 
 ```powershell
-$env:MSFS_TEST_AIRCRAFT_TITLE = "Airbus A320 Neo Asobo"
+$env:MSFS_TEST_AIRCRAFT_TITLE = "Another Exact Container Title"
 ```
 
 Use a dedicated test flight: the suite writes `L:MSFS_ASYNC_LIVE_TEST_VALUE`,

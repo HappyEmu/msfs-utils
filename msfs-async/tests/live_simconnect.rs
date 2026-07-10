@@ -189,8 +189,8 @@ async fn closing_one_handle_stops_all_clones() {
 #[tokio::test]
 #[ignore = "requires a running simulator and an installed test aircraft"]
 async fn creates_and_removes_an_ai_aircraft_when_configured() {
-    let model_title = std::env::var("MSFS_TEST_AIRCRAFT_TITLE")
-        .unwrap_or_else(|_| "Airbus A320 Neo Asobo".to_owned());
+    let model_title =
+        std::env::var("MSFS_TEST_AIRCRAFT_TITLE").unwrap_or_else(|_| "A320neo V2".to_owned());
     let sim = open("AI AIRCRAFT").await;
     let user = timeout(
         LIVE_TIMEOUT,
