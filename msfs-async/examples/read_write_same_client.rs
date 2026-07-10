@@ -1,7 +1,9 @@
 #[cfg(windows)]
 mod windows {
     use futures_util::TryStreamExt;
-    use msfs_async::{AsyncSimConnect, Period, SIMCONNECT_OBJECT_ID_USER, data_definition};
+    use msfs_async::{
+        AsyncSimConnect, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, data_definition,
+    };
     use std::time::Duration;
 
     #[data_definition]
@@ -18,7 +20,7 @@ mod windows {
 
         // Register the reader first so it observes every subsequent change.
         let updates = sim
-            .subscribe::<SharedValue>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+            .subscribe::<SharedValue>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
             .await?;
 
         // This clone sends commands to the same driver and SimConnect handle.

@@ -1,0 +1,5 @@
+error: Rust bool is not wire-safe; use i32 and convert nonzero values to true
+ --> tests/ui/bool_datum.rs:7:12
+  |
+7 |     value: bool,
+  |            ^^^^

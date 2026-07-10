@@ -35,6 +35,7 @@ pub trait ClientDataDefinition: 'static {
 pub unsafe trait AsyncClientDataDefinition:
     ClientDataDefinition + Copy + Send + 'static
 {
+    fn async_definitions() -> Vec<(usize, usize, u32, f32)>;
 }
 
 pub mod __private {
@@ -56,7 +57,7 @@ pub mod __private {
 struct AircraftData {
     #[name = "RADIO HEIGHT"]
     #[unit = "Feet"]
-    #[epsilon = 0.01]
+    #[epsilon = 1]
     height: f64,
 }
 
@@ -65,6 +66,13 @@ struct AircraftData {
 struct ClientData {
     counter: u32,
     state: u8,
+}
+
+#[client_data_definition]
+#[derive(Debug)]
+struct PaddedClientData {
+    byte: u8,
+    word: u32,
 }
 
 #[sync_data_definition]
@@ -88,6 +96,7 @@ fn assert_client_data<T: AsyncClientDataDefinition>() {}
 fn generated_types_implement_the_safe_api_contracts() {
     assert_aircraft_data::<AircraftData>();
     assert_client_data::<ClientData>();
+    assert_client_data::<PaddedClientData>();
     assert_aircraft_data::<SyncAircraftData>();
     assert_client_data::<SyncClientData>();
 
@@ -100,4 +109,13 @@ fn generated_types_implement_the_safe_api_contracts() {
     assert_eq!(definitions.len(), 2);
     assert_eq!(definitions[0].0, std::mem::offset_of!(ClientData, counter));
     assert_eq!(definitions[1].0, std::mem::offset_of!(ClientData, state));
+    let async_definitions = ClientData::async_definitions();
+    assert_eq!(async_definitions[0].2, (-3_i32) as u32);
+    assert_eq!(async_definitions[0].3, 0.0);
+    assert_eq!(async_definitions[1].2, (-1_i32) as u32);
+
+    let padded = PaddedClientData::get_definitions();
+    assert_eq!(padded[0].0, 0);
+    assert_eq!(padded[1].0, std::mem::offset_of!(PaddedClientData, word));
+    assert_eq!(padded[1].1, std::mem::size_of::<u32>());
 }

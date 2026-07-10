@@ -7,7 +7,9 @@ use common::{Controls, Data, Throttle};
 #[cfg(windows)]
 use futures_util::TryStreamExt;
 #[cfg(windows)]
-use msfs_async::{AsyncSimConnect, Error, Period, SIMCONNECT_OBJECT_ID_USER, Subscription};
+use msfs_async::{
+    AsyncSimConnect, Error, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, Subscription,
+};
 
 /// Give each data type an independent async consumer task. This is useful when
 /// consumers have unrelated processing or output responsibilities.
@@ -16,13 +18,13 @@ use msfs_async::{AsyncSimConnect, Error, Period, SIMCONNECT_OBJECT_ID_USER, Subs
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sim = AsyncSimConnect::open("ASYNC TASKS").await?;
     let data = sim
-        .subscribe::<Data>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+        .subscribe::<Data>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
         .await?;
     let controls = sim
-        .subscribe::<Controls>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+        .subscribe::<Controls>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
         .await?;
     let throttle = sim
-        .subscribe::<Throttle>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+        .subscribe::<Throttle>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
         .await?;
 
     let (data, controls, throttle) = tokio::try_join!(

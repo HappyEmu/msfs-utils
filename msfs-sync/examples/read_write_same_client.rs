@@ -1,6 +1,8 @@
 #[cfg(windows)]
 mod windows {
-    use msfs_sync::{Error, Period, SIMCONNECT_OBJECT_ID_USER, SimConnect, data_definition};
+    use msfs_sync::{
+        Error, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect, data_definition,
+    };
     use std::time::Duration;
 
     #[data_definition]
@@ -13,7 +15,8 @@ mod windows {
 
     pub fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sim = SimConnect::open("SYNC READ WRITE")?;
-        let updates = sim.subscribe::<SharedValue>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)?;
+        let updates =
+            sim.subscribe::<SharedValue>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)?;
 
         let writer = sim.clone();
         std::thread::scope(|scope| -> Result<(), Error> {

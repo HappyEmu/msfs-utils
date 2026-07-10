@@ -1,0 +1,5 @@
+error: generic data definitions are not supported
+ --> tests/ui/generic.rs:4:15
+  |
+4 | struct Invalid<T> {
+  |               ^

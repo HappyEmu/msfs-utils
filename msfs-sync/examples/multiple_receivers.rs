@@ -5,7 +5,7 @@ mod common;
 #[cfg(windows)]
 use common::{Controls, Data, Throttle};
 #[cfg(windows)]
-use msfs_sync::{Error, EventReceiver, Period, SIMCONNECT_OBJECT_ID_USER, SimConnect};
+use msfs_sync::{Error, EventReceiver, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect};
 
 #[cfg(windows)]
 #[derive(Debug)]
@@ -28,19 +28,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut flight_events = sim.event_receiver_with_capacity::<FlightEvent>(64);
     flight_events.subscribe::<Data, _>(
         SIMCONNECT_OBJECT_ID_USER,
-        Period::SimFrame,
+        RecurringPeriod::SimFrame,
         FlightEvent::Data,
     )?;
     flight_events.subscribe::<Throttle, _>(
         SIMCONNECT_OBJECT_ID_USER,
-        Period::SimFrame,
+        RecurringPeriod::SimFrame,
         FlightEvent::Throttle,
     )?;
 
     let mut control_events = sim.event_receiver::<ControlEvent>();
     control_events.subscribe::<Controls, _>(
         SIMCONNECT_OBJECT_ID_USER,
-        Period::SimFrame,
+        RecurringPeriod::SimFrame,
         ControlEvent::Controls,
     )?;
 

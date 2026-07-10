@@ -1,7 +1,7 @@
 #[cfg(windows)]
 mod windows {
     use futures_util::StreamExt;
-    use msfs_async::{AsyncSimConnect, FreezeState, Period, data_definition};
+    use msfs_async::{AsyncSimConnect, FreezeState, RecurringPeriod, data_definition};
     use std::io;
 
     #[data_definition]
@@ -37,7 +37,7 @@ mod windows {
         sim.release_ai_control(target_id).await?;
         sim.set_freeze(target_id, FreezeState::ALL).await?;
         let mut frames = sim
-            .subscribe_with_capacity::<FlightData>(source_id, Period::SimFrame, 1)
+            .subscribe_with_capacity::<FlightData>(source_id, RecurringPeriod::SimFrame, 1)
             .await?;
 
         loop {

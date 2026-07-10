@@ -1,0 +1,5 @@
+error: only repr(C) and repr(align(...)) are supported
+ --> tests/ui/packed.rs:4:11
+  |
+4 | #[repr(C, packed)]
+  |           ^^^^^^

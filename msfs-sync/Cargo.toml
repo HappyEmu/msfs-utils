@@ -2,6 +2,7 @@
 name = "msfs-sync"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Blocking SimConnect client built on the msfs-async driver"
 license = "MIT"
 autoexamples = false

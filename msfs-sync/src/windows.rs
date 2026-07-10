@@ -3,8 +3,8 @@ use msfs_async::__sys as sys;
 use msfs_async::{
     AsyncClientDataDefinition, AsyncDataDefinition, AsyncSimConnect, ClientDataArea, Error,
     ExceptionStream as AsyncExceptionStream, FreezeState, MappedEventSender, MappedEventStream,
-    MappedSubscription, Period, Result, ServerException, Subscription as AsyncSubscription,
-    mapped_event_channel,
+    MappedSubscription, RecurringPeriod, Result, ServerException,
+    Subscription as AsyncSubscription, SubscriptionOptions, mapped_event_channel,
 };
 
 /// A cloneable blocking handle to one SimConnect session.
@@ -17,6 +17,11 @@ impl SimConnect {
     /// Open a SimConnect session and its event-driven driver thread.
     pub fn open(name: impl Into<String>) -> Result<Self> {
         futures_executor::block_on(AsyncSimConnect::open(name)).map(|inner| Self { inner })
+    }
+
+    /// Close the shared native connection and wait for the driver to exit.
+    pub fn close(self) -> Result<()> {
+        futures_executor::block_on(self.inner.close())
     }
 
     /// Block until one typed value has been returned by SimConnect.
@@ -57,7 +62,7 @@ impl SimConnect {
     pub fn subscribe<T>(
         &self,
         object_id: sys::SIMCONNECT_OBJECT_ID,
-        period: Period,
+        period: RecurringPeriod,
     ) -> Result<Subscription<T>>
     where
         T: AsyncDataDefinition,
@@ -69,7 +74,7 @@ impl SimConnect {
     pub fn subscribe_with_capacity<T>(
         &self,
         object_id: sys::SIMCONNECT_OBJECT_ID,
-        period: Period,
+        period: RecurringPeriod,
         capacity: usize,
     ) -> Result<Subscription<T>>
     where
@@ -80,6 +85,19 @@ impl SimConnect {
                 .subscribe_with_capacity(object_id, period, capacity),
         )
         .map(Subscription::new)
+    }
+
+    /// Create a typed receiver with explicit buffering and native request options.
+    pub fn subscribe_with_options<T>(
+        &self,
+        object_id: sys::SIMCONNECT_OBJECT_ID,
+        options: SubscriptionOptions,
+    ) -> Result<Subscription<T>>
+    where
+        T: AsyncDataDefinition,
+    {
+        futures_executor::block_on(self.inner.subscribe_with_options(object_id, options))
+            .map(Subscription::new)
     }
 
     /// Create a receiver which combines several typed subscriptions.
@@ -160,7 +178,7 @@ where
     pub fn subscribe<T, F>(
         &mut self,
         object_id: sys::SIMCONNECT_OBJECT_ID,
-        period: Period,
+        period: RecurringPeriod,
         map: F,
     ) -> Result<()>
     where

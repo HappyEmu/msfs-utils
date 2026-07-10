@@ -2,8 +2,8 @@ use proc_macro::TokenStream;
 use proc_macro2::Span;
 use quote::{format_ident, quote};
 use syn::{
-    Attribute, Expr, ExprLit, Fields, ItemStruct, Lit, LitFloat, LitStr, Member, Meta, Type,
-    parse_macro_input, spanned::Spanned,
+    Attribute, Expr, ExprLit, Fields, ItemStruct, Lit, LitFloat, LitStr, Member, Meta, Token, Type,
+    parse_macro_input, punctuated::Punctuated, spanned::Spanned,
 };
 
 /// Define typed simulation-object data with a validated wire layout.
@@ -52,6 +52,7 @@ fn expand_data_definition(
 ) -> syn::Result<proc_macro2::TokenStream> {
     validate_struct(input)?;
     let add_repr = validate_repr(&input.attrs)?;
+    let copy_derives = generated_copy_derives(&input.attrs)?;
     let struct_name = input.ident.clone();
     let mut definitions = Vec::new();
     let mut assertions = Vec::new();
@@ -80,7 +81,7 @@ fn expand_data_definition(
         });
 
         definitions.push(quote! {
-            (#name, #unit, #epsilon, #root::__sys::#datatype)
+            (#name, #unit, (#epsilon) as f32, #root::__sys::#datatype)
         });
         assertions.push(quote! {
             let _: ::core::marker::PhantomData<
@@ -92,7 +93,7 @@ fn expand_data_definition(
     let repr = add_repr.then(|| quote!(#[repr(C)]));
     Ok(quote! {
         #repr
-        #[derive(Clone, Copy)]
+        #copy_derives
         #input
 
         impl #root::DataDefinition for #struct_name {
@@ -118,14 +119,24 @@ fn expand_client_data_definition(
 ) -> syn::Result<proc_macro2::TokenStream> {
     validate_struct(input)?;
     let add_repr = validate_repr(&input.attrs)?;
+    let copy_derives = generated_copy_derives(&input.attrs)?;
     let struct_name = input.ident.clone();
     let mut definitions = Vec::new();
+    let mut async_definitions = Vec::new();
     let mut assertions = Vec::new();
 
     for (index, field) in input.fields.iter_mut().enumerate() {
         let ty = field.ty.clone();
         reject_bool(&ty)?;
-        let epsilon = take_client_epsilon(&mut field.attrs)?.unwrap_or_else(|| {
+        let epsilon_attribute = take_client_epsilon(&mut field.attrs)?;
+        let sdk_type = client_data_sdk_type(&ty);
+        if epsilon_attribute.is_some() && sdk_type.is_none() {
+            return Err(syn::Error::new(
+                ty.span(),
+                "#[epsilon] requires a scalar i8/i16/i32/i64/f32/f64 client-data field",
+            ));
+        }
+        let epsilon = epsilon_attribute.unwrap_or_else(|| {
             Expr::Lit(ExprLit {
                 attrs: Vec::new(),
                 lit: Lit::Float(LitFloat::new("0.0", Span::call_site())),
@@ -141,7 +152,17 @@ fn expand_client_data_definition(
             (
                 ::core::mem::offset_of!(#struct_name, #member),
                 ::core::mem::size_of::<#ty>(),
-                #epsilon,
+                (#epsilon) as f32,
+            )
+        });
+        let sdk_size_or_type =
+            sdk_type.unwrap_or_else(|| quote!(::core::mem::size_of::<#ty>() as u32));
+        async_definitions.push(quote! {
+            (
+                ::core::mem::offset_of!(#struct_name, #member),
+                ::core::mem::size_of::<#ty>(),
+                #sdk_size_or_type,
+                (#epsilon) as f32,
             )
         });
         assertions.push(quote! {
@@ -154,7 +175,7 @@ fn expand_client_data_definition(
     let repr = add_repr.then(|| quote!(#[repr(C)]));
     Ok(quote! {
         #repr
-        #[derive(Clone, Copy)]
+        #copy_derives
         #input
 
         impl #root::ClientDataDefinition for #struct_name {
@@ -163,7 +184,11 @@ fn expand_client_data_definition(
             }
         }
 
-        unsafe impl #root::AsyncClientDataDefinition for #struct_name {}
+        unsafe impl #root::AsyncClientDataDefinition for #struct_name {
+            fn async_definitions() -> ::std::vec::Vec<(usize, usize, u32, f32)> {
+                ::std::vec![#(#async_definitions),*]
+            }
+        }
 
         const _: () = {
             #(#assertions)*
@@ -208,6 +233,31 @@ fn validate_repr(attrs: &[Attribute]) -> syn::Result<bool> {
     Ok(!has_c)
 }
 
+fn generated_copy_derives(attrs: &[Attribute]) -> syn::Result<proc_macro2::TokenStream> {
+    let mut has_clone = false;
+    let mut has_copy = false;
+    for attr in attrs.iter().filter(|attr| attr.path().is_ident("derive")) {
+        let derives = attr.parse_args_with(Punctuated::<syn::Path, Token![,]>::parse_terminated)?;
+        for derive in derives {
+            has_clone |= derive.is_ident("Clone");
+            has_copy |= derive.is_ident("Copy");
+        }
+    }
+
+    let missing = [
+        (!has_clone).then(|| quote!(Clone)),
+        (!has_copy).then(|| quote!(Copy)),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if missing.is_empty() {
+        Ok(quote!())
+    } else {
+        Ok(quote!(#[derive(#(#missing),*)]))
+    }
+}
+
 fn simconnect_datatype(ty: &Type) -> syn::Result<syn::Ident> {
     let Type::Path(path) = ty else {
         return Err(syn::Error::new(
@@ -245,6 +295,23 @@ fn simconnect_datatype(ty: &Type) -> syn::Result<syn::Ident> {
     ))
 }
 
+fn client_data_sdk_type(ty: &Type) -> Option<proc_macro2::TokenStream> {
+    let Type::Path(path) = ty else {
+        return None;
+    };
+    let name = path.path.segments.last()?.ident.to_string();
+    let value = match name.as_str() {
+        "u8" | "i8" => -1_i32,
+        "u16" | "i16" => -2_i32,
+        "u32" | "i32" => -3_i32,
+        "u64" | "i64" => -4_i32,
+        "f32" => -5_i32,
+        "f64" => -6_i32,
+        _ => return None,
+    };
+    Some(quote!((#value) as u32))
+}
+
 #[derive(Default)]
 struct DataMetadata {
     name: Option<LitStr>,
@@ -257,10 +324,22 @@ fn take_data_metadata(attrs: &mut Vec<Attribute>) -> syn::Result<DataMetadata> {
     let mut retained = Vec::with_capacity(attrs.len());
     for attr in attrs.drain(..) {
         if attr.path().is_ident("name") {
+            if metadata.name.is_some() {
+                return Err(syn::Error::new(attr.span(), "duplicate #[name] attribute"));
+            }
             metadata.name = Some(parse_string_attribute(&attr)?);
         } else if attr.path().is_ident("unit") {
+            if metadata.unit.is_some() {
+                return Err(syn::Error::new(attr.span(), "duplicate #[unit] attribute"));
+            }
             metadata.unit = Some(parse_string_attribute(&attr)?);
         } else if attr.path().is_ident("epsilon") {
+            if metadata.epsilon.is_some() {
+                return Err(syn::Error::new(
+                    attr.span(),
+                    "duplicate #[epsilon] attribute",
+                ));
+            }
             metadata.epsilon = Some(parse_number_attribute(&attr)?);
         } else {
             retained.push(attr);
@@ -275,6 +354,12 @@ fn take_client_epsilon(attrs: &mut Vec<Attribute>) -> syn::Result<Option<Expr>> 
     let mut retained = Vec::with_capacity(attrs.len());
     for attr in attrs.drain(..) {
         if attr.path().is_ident("epsilon") {
+            if epsilon.is_some() {
+                return Err(syn::Error::new(
+                    attr.span(),
+                    "duplicate #[epsilon] attribute",
+                ));
+            }
             epsilon = Some(parse_number_attribute(&attr)?);
         } else {
             retained.push(attr);
@@ -388,5 +473,48 @@ mod tests {
 
         let error = expand_client_data_definition(&mut input, &quote!(::msfs_async)).unwrap_err();
         assert!(error.to_string().contains("repr(C)"));
+    }
+
+    #[test]
+    fn preserves_existing_copy_derives() {
+        let mut input: ItemStruct = parse_quote! {
+            #[derive(Clone, Copy)]
+            struct Data {
+                #[name = "RADIO HEIGHT"]
+                #[unit = "Feet"]
+                value: f64,
+            }
+        };
+
+        let output = expand_data_definition(&mut input, &quote!(::msfs_async)).unwrap();
+        assert_eq!(output.to_string().matches("derive").count(), 1);
+    }
+
+    #[test]
+    fn rejects_duplicate_field_metadata() {
+        let mut input: ItemStruct = parse_quote! {
+            struct Data {
+                #[name = "RADIO HEIGHT"]
+                #[name = "PLANE ALTITUDE"]
+                #[unit = "Feet"]
+                value: f64,
+            }
+        };
+
+        let error = expand_data_definition(&mut input, &quote!(::msfs_async)).unwrap_err();
+        assert!(error.to_string().contains("duplicate #[name]"));
+    }
+
+    #[test]
+    fn rejects_epsilon_for_untyped_client_data() {
+        let mut input: ItemStruct = parse_quote! {
+            struct Data {
+                #[epsilon = 1]
+                bytes: [u8; 4],
+            }
+        };
+
+        let error = expand_client_data_definition(&mut input, &quote!(::msfs_async)).unwrap_err();
+        assert!(error.to_string().contains("requires a scalar"));
     }
 }

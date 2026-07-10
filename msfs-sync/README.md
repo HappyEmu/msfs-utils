@@ -6,7 +6,7 @@ A blocking facade over the event-driven `msfs-async` SimConnect driver.
 let sim = SimConnect::open("SYNC CLIENT")?;
 let updates = sim.subscribe::<AircraftData>(
     SIMCONNECT_OBJECT_ID_USER,
-    Period::SimFrame,
+    RecurringPeriod::SimFrame,
 )?;
 
 for value in updates {
@@ -17,6 +17,11 @@ for value in updates {
 The driver still waits on the native Windows SimConnect event and drains the
 queue automatically. Blocking consumers do not call `call_dispatch` or sleep
 to poll for messages.
+
+`subscribe_with_options` supports latest-value telemetry and the native
+changed-only, origin, interval, and limit request settings. Mapping functions
+registered with `EventReceiver` execute on the receiving thread rather than on
+the SimConnect driver thread.
 
 The same target-object controls are available synchronously:
 

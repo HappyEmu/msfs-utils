@@ -1,6 +1,6 @@
 #[cfg(windows)]
 mod windows {
-    use msfs_sync::{FreezeState, Period, SimConnect, data_definition};
+    use msfs_sync::{FreezeState, RecurringPeriod, SimConnect, data_definition};
     use std::io;
 
     #[data_definition]
@@ -34,7 +34,8 @@ mod windows {
         let mut exceptions = sim.exceptions()?;
         sim.release_ai_control(target_id)?;
         sim.set_freeze(target_id, FreezeState::ALL)?;
-        let frames = sim.subscribe_with_capacity::<FlightData>(source_id, Period::SimFrame, 1)?;
+        let frames =
+            sim.subscribe_with_capacity::<FlightData>(source_id, RecurringPeriod::SimFrame, 1)?;
 
         for frame in frames {
             sim.set_data_on_sim_object(target_id, &frame?)?;

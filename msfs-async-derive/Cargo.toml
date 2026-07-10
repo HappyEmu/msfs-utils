@@ -2,6 +2,7 @@
 name = "msfs-async-derive"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Validated data-definition macros for msfs-async"
 license = "MIT"
 
@@ -12,3 +13,6 @@ proc-macro = true
 proc-macro2 = "1"
 quote = "1"
 syn = { version = "2", features = ["full"] }
+
+[dev-dependencies]
+trybuild = "1"

@@ -7,7 +7,7 @@ use common::{Controls, Data, Throttle};
 #[cfg(windows)]
 use futures_util::StreamExt;
 #[cfg(windows)]
-use msfs_async::{AsyncSimConnect, Period, SIMCONNECT_OBJECT_ID_USER};
+use msfs_async::{AsyncSimConnect, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER};
 
 /// Multiplex several typed subscriptions in one control-flow loop. The match
 /// is over typed stream values rather than raw SimConnect request IDs.
@@ -16,13 +16,13 @@ use msfs_async::{AsyncSimConnect, Period, SIMCONNECT_OBJECT_ID_USER};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sim = AsyncSimConnect::open("ASYNC SELECT").await?;
     let mut data = sim
-        .subscribe::<Data>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+        .subscribe::<Data>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
         .await?;
     let mut controls = sim
-        .subscribe::<Controls>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+        .subscribe::<Controls>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
         .await?;
     let mut throttle = sim
-        .subscribe::<Throttle>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+        .subscribe::<Throttle>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
         .await?;
 
     loop {

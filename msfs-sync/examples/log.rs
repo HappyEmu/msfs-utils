@@ -5,14 +5,16 @@ mod common;
 #[cfg(windows)]
 use common::{Controls, Data, Throttle};
 #[cfg(windows)]
-use msfs_sync::{Error, Period, SIMCONNECT_OBJECT_ID_USER, SimConnect, Subscription};
+use msfs_sync::{Error, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect, Subscription};
 
 #[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let sim = SimConnect::open("SYNC LOG")?;
-    let data = sim.subscribe::<Data>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)?;
-    let controls = sim.subscribe::<Controls>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)?;
-    let throttle = sim.subscribe::<Throttle>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)?;
+    let data = sim.subscribe::<Data>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)?;
+    let controls =
+        sim.subscribe::<Controls>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)?;
+    let throttle =
+        sim.subscribe::<Throttle>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)?;
 
     std::thread::scope(|scope| -> Result<(), Error> {
         let data = scope.spawn(|| consume("Data", data));

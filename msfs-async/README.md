@@ -15,7 +15,7 @@ let current = sim
     .await?;
 
 let updates = sim
-    .subscribe::<AircraftData>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+    .subscribe::<AircraftData>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
     .await?;
 
 sim.set_data_on_sim_object(SIMCONNECT_OBJECT_ID_USER, &updated).await?;
@@ -36,7 +36,24 @@ to `sim.exceptions()`.
 
 `request_once` is a future which resolves to one owned value. `subscribe`
 returns a `Stream<Item = Result<T>>`; dropping that stream sends the same
-request with `Period::Never` and unregisters its route.
+request with the native disabled period and unregisters its route.
+
+For frame telemetry, latest-value delivery avoids processing stale buffered
+poses when a consumer falls behind:
+
+```rust
+let updates = sim
+    .subscribe_with_options::<AircraftData>(
+        SIMCONNECT_OBJECT_ID_USER,
+        SubscriptionOptions::new(RecurringPeriod::SimFrame).latest(),
+    )
+    .await?;
+```
+
+`SubscriptionOptions` also exposes the native changed-only, origin, interval,
+and limit settings. `event_stream()` combines heterogeneous typed
+subscriptions; its mapping functions run in the polling task, not on the
+native driver thread.
 
 The `#[data_definition]` and `#[client_data_definition]` macros generate the C
 layout, `Copy` implementation, SDK definition trait, and internal safety marker.

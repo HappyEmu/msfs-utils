@@ -181,6 +181,7 @@ impl Recording {
 }
 
 /// Errors produced while loading or validating a recording.
+#[non_exhaustive]
 #[derive(Debug)]
 pub enum RecordingError {
     Io(io::Error),
@@ -431,5 +432,107 @@ mod tests {
         .unwrap();
 
         assert!(recording.sample(1.001).is_none());
+    }
+
+    #[test]
+    fn rejects_invalid_csv_shape_and_values() {
+        let shape = Recording::from_csv_reader(b"0,1,2\n1,2,3\n".as_slice()).unwrap_err();
+        assert!(matches!(shape, RecordingError::InvalidCsv { line: 1, .. }));
+
+        let value = Recording::from_csv_reader(b"0,1,2,3,4,5,nope\n1,2,3,4,5,6,7\n".as_slice())
+            .unwrap_err();
+        assert!(matches!(value, RecordingError::InvalidCsv { line: 1, .. }));
+    }
+
+    #[test]
+    fn rejects_non_finite_and_non_increasing_samples() {
+        let non_finite = Recording::new(vec![
+            TimedPose {
+                seconds: 0.0,
+                pose: pose(0.0, 0.0, 0.0, 0.0),
+            },
+            TimedPose {
+                seconds: 1.0,
+                pose: pose(f64::NAN, 0.0, 0.0, 0.0),
+            },
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            non_finite,
+            RecordingError::InvalidSample { index: 1 }
+        ));
+
+        let duplicate = Recording::new(vec![
+            TimedPose {
+                seconds: 1.0,
+                pose: pose(0.0, 0.0, 0.0, 0.0),
+            },
+            TimedPose {
+                seconds: 1.0,
+                pose: pose(0.0, 0.0, 0.0, 0.0),
+            },
+        ])
+        .unwrap_err();
+        assert!(matches!(
+            duplicate,
+            RecordingError::NonIncreasingTimestamp { index: 1 }
+        ));
+    }
+
+    #[test]
+    fn sampling_preserves_both_endpoints() {
+        let first = pose(10.0, -5.0, 2.0, 350.0);
+        let last = pose(20.0, 5.0, -2.0, 10.0);
+        let recording = Recording::new(vec![
+            TimedPose {
+                seconds: 10.0,
+                pose: first,
+            },
+            TimedPose {
+                seconds: 12.0,
+                pose: last,
+            },
+        ])
+        .unwrap();
+
+        assert_eq!(recording.sample(0.0), Some(first));
+        assert_eq!(recording.sample(2.0), Some(last));
+        assert_eq!(recording.sample(-1.0), Some(first));
+        assert_eq!(recording.sample(f64::NAN), None);
+    }
+
+    #[test]
+    fn wraps_longitude_in_both_directions() {
+        let recording = Recording::new(vec![
+            TimedPose {
+                seconds: 0.0,
+                pose: pose(-179.0, 0.0, 0.0, 0.0),
+            },
+            TimedPose {
+                seconds: 1.0,
+                pose: pose(179.0, 0.0, 0.0, 0.0),
+            },
+        ])
+        .unwrap();
+
+        let middle = recording.sample(0.5).unwrap().longitude;
+        assert!((middle.abs() - 180.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn combined_rotation_near_gimbal_lock_remains_finite() {
+        let recording = Recording::new(vec![
+            TimedPose {
+                seconds: 0.0,
+                pose: pose(0.0, 89.9, 45.0, 350.0),
+            },
+            TimedPose {
+                seconds: 1.0,
+                pose: pose(0.0, 90.1, -45.0, 10.0),
+            },
+        ])
+        .unwrap();
+
+        assert!(recording.sample(0.5).unwrap().is_finite());
     }
 }

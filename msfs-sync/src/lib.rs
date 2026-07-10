@@ -16,8 +16,8 @@ pub use msfs_async::{__private, __sys};
 #[cfg(windows)]
 pub use msfs_async::{
     AsyncClientDataDefinition, AsyncDataDefinition, ClientDataArea, ClientDataDefinition,
-    DataDefinition, DataXYZ, Error, FreezeState, Period, Result, SIMCONNECT_OBJECT_ID_USER,
-    ServerException,
+    DataDefinition, DataXYZ, Error, FreezeState, OverflowPolicy, Period, RecurringPeriod, Result,
+    SIMCONNECT_OBJECT_ID_USER, ServerException, SubscriptionOptions,
 };
 #[cfg(windows)]
 pub use msfs_async_derive::{

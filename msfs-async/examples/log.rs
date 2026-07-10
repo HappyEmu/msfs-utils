@@ -6,19 +6,19 @@ mod common;
 mod windows {
     use super::common::{Controls, Data, Throttle};
     use futures_util::TryStreamExt;
-    use msfs_async::{AsyncSimConnect, Period, SIMCONNECT_OBJECT_ID_USER};
+    use msfs_async::{AsyncSimConnect, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER};
 
     #[tokio::main]
     pub async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let sim = AsyncSimConnect::open("ASYNC LOG").await?;
         let data = sim
-            .subscribe::<Data>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+            .subscribe::<Data>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
             .await?;
         let controls = sim
-            .subscribe::<Controls>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+            .subscribe::<Controls>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
             .await?;
         let throttle = sim
-            .subscribe::<Throttle>(SIMCONNECT_OBJECT_ID_USER, Period::SimFrame)
+            .subscribe::<Throttle>(SIMCONNECT_OBJECT_ID_USER, RecurringPeriod::SimFrame)
             .await?;
 
         futures_util::try_join!(
