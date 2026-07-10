@@ -4,13 +4,11 @@ use crate::live::{LatestLocalState, LatestRemoteSnapshot};
 use crate::protocol::{AircraftState, AircraftUpdate, UserId};
 use msfs_sync::{
     AiAircraft, InitialPosition, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect,
-    SubscriptionOptions, data_definition,
+    Subscription, SubscriptionOptions, data_definition,
 };
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write;
 use std::time::Duration;
-use std::time::Instant;
-
-const DRIFT_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 #[data_definition]
 #[derive(Debug)]
@@ -112,7 +110,7 @@ struct RemoteAircraftPosition {
 struct RemoteAircraft {
     handle: AiAircraft,
     expected: AircraftState,
-    next_drift_log: Instant,
+    drift_updates: Option<Subscription<RemoteAircraftPosition>>,
 }
 
 pub fn run(
@@ -173,6 +171,10 @@ fn reconcile(
                 initial_position(update.state),
             )?;
             sim.release_ai_control(created.object_id())?;
+            let drift_updates = sim.subscribe_with_options::<RemoteAircraftPosition>(
+                created.object_id(),
+                SubscriptionOptions::new(RecurringPeriod::Second).latest(),
+            )?;
             eprintln!(
                 "Created remote user {} as object {}.",
                 update.user_id,
@@ -183,7 +185,7 @@ fn reconcile(
                 RemoteAircraft {
                     handle: created,
                     expected: update.state,
-                    next_drift_log: Instant::now() + DRIFT_LOG_INTERVAL,
+                    drift_updates: Some(drift_updates),
                 },
             );
         }
@@ -194,7 +196,6 @@ fn reconcile(
         remote.expected = update.state;
         let object_id = remote.handle.object_id();
         sim.set_data_on_sim_object(object_id, &RemoteAircraftData::from(update.state))?;
-        log_drift_if_due(sim, update.user_id, remote);
     }
 
     let removed = aircraft
@@ -209,35 +210,45 @@ fn reconcile(
         sim.remove_object(object.handle.object_id())?;
         eprintln!("Removed remote user {user_id}.");
     }
+    log_ready_drifts(aircraft);
     Ok(())
 }
 
-fn log_drift_if_due(sim: &SimConnect, user_id: UserId, remote: &mut RemoteAircraft) {
-    let now = Instant::now();
-    if now < remote.next_drift_log {
-        return;
+fn log_ready_drifts(aircraft: &mut HashMap<UserId, RemoteAircraft>) {
+    let mut output = String::new();
+    for (&user_id, remote) in aircraft {
+        let Some(drift_updates) = remote.drift_updates.as_mut() else {
+            continue;
+        };
+        match drift_updates.try_recv() {
+            Ok(Some(actual)) => {
+                let expected = remote.expected;
+                let drift = position_drift(
+                    expected.latitude,
+                    expected.longitude,
+                    expected.altitude,
+                    actual.latitude,
+                    actual.longitude,
+                    actual.altitude,
+                );
+                let _ = writeln!(
+                    output,
+                    "Remote user {user_id} drift: horizontal={:.1} ft vertical={:+.1} ft total={:.1} ft",
+                    drift.horizontal_feet, drift.vertical_feet, drift.total_feet,
+                );
+            }
+            Ok(None) => {}
+            Err(error) => {
+                let _ = writeln!(
+                    output,
+                    "Stopped measuring remote user {user_id} drift: {error}",
+                );
+                remote.drift_updates = None;
+            }
+        }
     }
-    remote.next_drift_log = now + DRIFT_LOG_INTERVAL;
-
-    match sim.request_once::<RemoteAircraftPosition>(remote.handle.object_id()) {
-        Ok(actual) => {
-            let expected = remote.expected;
-            let drift = position_drift(
-                expected.latitude,
-                expected.longitude,
-                expected.altitude,
-                actual.latitude,
-                actual.longitude,
-                actual.altitude,
-            );
-            eprintln!(
-                "Remote user {user_id} drift: horizontal={:.1} ft vertical={:+.1} ft total={:.1} ft",
-                drift.horizontal_feet, drift.vertical_feet, drift.total_feet,
-            );
-        }
-        Err(error) => {
-            eprintln!("Could not measure remote user {user_id} drift: {error}");
-        }
+    if !output.is_empty() {
+        eprint!("{output}");
     }
 }
 

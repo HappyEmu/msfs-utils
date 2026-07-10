@@ -48,8 +48,8 @@ velocities. The SimConnect injector leaves released remote aircraft unfrozen,
 sets their recorded attitude and body velocities, and lets the simulator move
 them without subsequent latitude, longitude, or altitude corrections.
 For each remote user, the live client reads the simulator's actual position
-once per second and logs horizontal, signed vertical, and total 3D drift from
-the latest received position.
+through a non-blocking once-per-second subscription and logs horizontal, signed
+vertical, and total 3D drift from the latest received position.
 The relay currently encodes one complete snapshot per recipient every 33 ms,
 making its snapshot work quadratic in the number of connected users; it is
 intended for small prototype sessions, not large deployments.
