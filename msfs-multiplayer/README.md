@@ -50,7 +50,10 @@ creates them on a dedicated worker, and aligns each assigned object to a fresh
 buffered target after its position, altitude, and attitude freeze states are
 confirmed. It activates velocity-only playback after confirming those states
 are unfrozen again, with no subsequent latitude, longitude, or altitude
-corrections.
+corrections during normal operation. For the first 30 simulator seconds after
+assignment, a bounded initialization watchdog repeats that confirmed alignment
+if MSFS resets the object by more than 100 feet while loading its model. Each
+reset extends monitoring until the object has remained stable for ten seconds.
 For each remote user, the live client reads position and simulator absolute time
 through a non-blocking once-per-second subscription. It aligns that measurement
 with buffered target history on the simulator clock, then logs along-track,

@@ -177,6 +177,7 @@ struct RemoteAircraft {
     drift_updates: Option<Subscription<RemoteAircraftPosition>>,
     target_history: TargetTimeline,
     pending_actual: Option<RemoteAircraftPosition>,
+    initialization_watchdog_until: Option<f64>,
 }
 
 struct CreationRequest {
@@ -206,16 +207,27 @@ struct AligningAircraft {
     handle: AiAircraft,
     freeze_updates: Subscription<RemoteAircraftFreezeState>,
     phase: AlignmentPhase,
+    initialization_watchdog_until: f64,
+}
+
+struct PendingAlignment {
+    handle: AiAircraft,
+    release_ai_control: bool,
+    initialization_watchdog_until: Option<f64>,
 }
 
 struct RemoteFleet {
     aircraft: HashMap<UserId, RemoteAircraft>,
-    awaiting_alignment: HashMap<UserId, AiAircraft>,
+    awaiting_alignment: HashMap<UserId, PendingAlignment>,
     aligning: HashMap<UserId, AligningAircraft>,
     pending_creations: HashSet<UserId>,
     desired_users: HashSet<UserId>,
     creation_worker: CreationWorker,
 }
+
+const INITIALIZATION_WATCHDOG_SECONDS: f64 = 30.0;
+const INITIALIZATION_STABILITY_SECONDS: f64 = 10.0;
+const INITIALIZATION_REALIGN_THRESHOLD_FEET: f64 = 100.0;
 
 impl CreationWorker {
     fn spawn(sim: SimConnect, model_title: String) -> Result<Self, io::Error> {
@@ -391,13 +403,18 @@ fn reconcile(
                     drift_updates: Some(drift_updates),
                     target_history: TargetTimeline::default(),
                     pending_actual: None,
+                    initialization_watchdog_until: Some(aligning.initialization_watchdog_until),
                 },
             );
         }
 
-        if let Some(created) = fleet.awaiting_alignment.remove(&update.user_id) {
-            let object_id = created.object_id();
-            sim.release_ai_control(object_id)?;
+        if let Some(receiver_absolute_time) = receiver_absolute_time
+            && let Some(pending) = fleet.awaiting_alignment.remove(&update.user_id)
+        {
+            let object_id = pending.handle.object_id();
+            if pending.release_ai_control {
+                sim.release_ai_control(object_id)?;
+            }
             let freeze_updates = sim.subscribe_with_options::<RemoteAircraftFreezeState>(
                 object_id,
                 SubscriptionOptions::new(RecurringPeriod::SimFrame).latest(),
@@ -406,9 +423,12 @@ fn reconcile(
             fleet.aligning.insert(
                 update.user_id,
                 AligningAircraft {
-                    handle: created,
+                    handle: pending.handle,
                     freeze_updates,
                     phase: AlignmentPhase::WaitingForFreeze,
+                    initialization_watchdog_until: pending
+                        .initialization_watchdog_until
+                        .unwrap_or(receiver_absolute_time + INITIALIZATION_WATCHDOG_SECONDS),
                 },
             );
             eprintln!(
@@ -482,7 +502,7 @@ fn reconcile(
             .awaiting_alignment
             .remove(&user_id)
             .expect("the object ID came from this map");
-        sim.remove_object(object.object_id())?;
+        sim.remove_object(object.handle.object_id())?;
         eprintln!("Removed unaligned remote user {user_id}.");
     }
     let positioning_removed = fleet
@@ -499,7 +519,25 @@ fn reconcile(
         sim.remove_object(object.handle.object_id())?;
         eprintln!("Removed positioning remote user {user_id}.");
     }
-    log_ready_drifts(&mut fleet.aircraft);
+    let reset_users = log_ready_drifts(&mut fleet.aircraft);
+    for user_id in reset_users {
+        let remote = fleet
+            .aircraft
+            .remove(&user_id)
+            .expect("the watchdog user came from the active aircraft map");
+        let object_id = remote.handle.object_id();
+        fleet.awaiting_alignment.insert(
+            user_id,
+            PendingAlignment {
+                handle: remote.handle,
+                release_ai_control: false,
+                initialization_watchdog_until: remote.initialization_watchdog_until,
+            },
+        );
+        eprintln!(
+            "Remote user {user_id} object {object_id} reset during initialization; realigning."
+        );
+    }
     Ok(())
 }
 
@@ -526,8 +564,15 @@ fn collect_creation_completions(sim: &SimConnect, fleet: &mut RemoteFleet) -> Re
                 completion.user_id,
                 created.object_id(),
             );
-            if let Some(replaced) = fleet.awaiting_alignment.insert(completion.user_id, created) {
-                sim.remove_object(replaced.object_id())?;
+            if let Some(replaced) = fleet.awaiting_alignment.insert(
+                completion.user_id,
+                PendingAlignment {
+                    handle: created,
+                    release_ai_control: true,
+                    initialization_watchdog_until: None,
+                },
+            ) {
+                sim.remove_object(replaced.handle.object_id())?;
             }
         } else {
             sim.remove_object(created.object_id())?;
@@ -539,8 +584,9 @@ fn collect_creation_completions(sim: &SimConnect, fleet: &mut RemoteFleet) -> Re
     }
 }
 
-fn log_ready_drifts(aircraft: &mut HashMap<UserId, RemoteAircraft>) {
+fn log_ready_drifts(aircraft: &mut HashMap<UserId, RemoteAircraft>) -> Vec<UserId> {
     let mut output = String::new();
+    let mut reset_users = Vec::new();
     for (&user_id, remote) in aircraft {
         let Some(drift_updates) = remote.drift_updates.as_mut() else {
             continue;
@@ -600,11 +646,26 @@ fn log_ready_drifts(aircraft: &mut HashMap<UserId, RemoteAircraft>) {
             expected.buffer_depth,
             expected.underrun,
         );
+        if let Some(watchdog_until) = remote.initialization_watchdog_until {
+            if actual.absolute_time > watchdog_until {
+                remote.initialization_watchdog_until = None;
+                let _ = writeln!(
+                    output,
+                    "user={user_id} initialization stable; position watchdog disabled",
+                );
+            } else if drift.total_feet > INITIALIZATION_REALIGN_THRESHOLD_FEET {
+                remote.initialization_watchdog_until = Some(
+                    watchdog_until.max(actual.absolute_time + INITIALIZATION_STABILITY_SECONDS),
+                );
+                reset_users.push(user_id);
+            }
+        }
         remote.pending_actual = None;
     }
     if !output.is_empty() {
         eprint!("{output}");
     }
+    reset_users
 }
 
 fn initial_position(state: AircraftState) -> InitialPosition {
