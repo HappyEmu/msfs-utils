@@ -19,13 +19,13 @@ cargo run -p msfs-multiplayer -- server 0.0.0.0:9997
 Connect MSFS using an installed aircraft container title for remote users:
 
 ```console
-cargo run -p msfs-multiplayer -- client 127.0.0.1:9997 "Airbus A320 Neo Asobo"
+cargo run -p msfs-multiplayer -- client 127.0.0.1:9997 "A320neo V2"
 ```
 
 Publish ten synthetic users from a recording:
 
 ```console
-cargo run -p msfs-multiplayer -- replay 127.0.0.1:9997 flight.csv 10
+cargo run -p msfs-multiplayer -- replay 127.0.0.1:9997 flight_a320_vel2.csv 10
 ```
 
 Run the platform-independent jitter-buffer example:
@@ -43,6 +43,10 @@ The relay uses versioned UDP datagrams, rejects stale per-user updates, excludes
 the receiving user from snapshots, and expires silent clients after ten
 seconds. The live client shares only the newest local state and remote snapshot,
 so slow SimConnect operations do not build an unbounded queue of stale poses.
+Replay clients preserve the original `fsmp` recording's world and body
+velocities. The SimConnect injector leaves released remote aircraft unfrozen,
+sets their body velocities, and corrects their recorded pose on every update so
+the simulator can move them between network samples.
 The relay currently encodes one complete snapshot per recipient every 33 ms,
 making its snapshot work quadratic in the number of connected users; it is
 intended for small prototype sessions, not large deployments.

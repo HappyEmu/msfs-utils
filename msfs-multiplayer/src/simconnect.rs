@@ -2,8 +2,8 @@ use crate::DynError;
 use crate::live::{LatestLocalState, LatestRemoteSnapshot};
 use crate::protocol::{AircraftState, AircraftUpdate, UserId};
 use msfs_sync::{
-    AiAircraft, FreezeState, InitialPosition, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER,
-    SimConnect, SubscriptionOptions, data_definition,
+    AiAircraft, InitialPosition, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect,
+    SubscriptionOptions, data_definition,
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
@@ -158,7 +158,6 @@ fn reconcile(
                 initial_position(update.state),
             )?;
             sim.release_ai_control(created.object_id())?;
-            sim.set_freeze(created.object_id(), FreezeState::ALL)?;
             eprintln!(
                 "Created remote user {} as object {}.",
                 update.user_id,

@@ -1,7 +1,7 @@
 use crate::DynError;
 use crate::network::RelayClient;
 use crate::protocol::{self, AircraftState};
-use msfs_replay::{Pose, Recording};
+use msfs_replay::{Recording, Sample};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::Duration;
@@ -38,12 +38,12 @@ async fn run_client(server: SocketAddr, recording: Recording) -> Result<(), DynE
             _ = updates.tick() => {
                 let elapsed = started.elapsed().as_secs_f64();
                 let finished = elapsed >= recording.duration_seconds();
-                let pose = recording
-                    .sample(elapsed.min(recording.duration_seconds()))
+                let sample = recording
+                    .sample_with_velocity(elapsed.min(recording.duration_seconds()))
                     .expect("a validated recording always has a final sample");
                 sequence = sequence.wrapping_add(1);
                 client
-                    .send_update(sequence, elapsed, state_from_pose(pose))
+                    .send_update(sequence, elapsed, state_from_sample(sample))
                     .await?;
                 if finished {
                     client.leave().await?;
@@ -57,14 +57,55 @@ async fn run_client(server: SocketAddr, recording: Recording) -> Result<(), DynE
     }
 }
 
-fn state_from_pose(pose: Pose) -> AircraftState {
+fn state_from_sample(sample: Sample) -> AircraftState {
     AircraftState {
-        latitude: pose.latitude,
-        longitude: pose.longitude,
-        altitude: pose.altitude,
-        heading: pose.heading,
-        pitch: pose.pitch,
-        bank: pose.bank,
+        latitude: sample.pose.latitude,
+        longitude: sample.pose.longitude,
+        altitude: sample.pose.altitude,
+        heading: sample.pose.heading,
+        pitch: sample.pose.pitch,
+        bank: sample.pose.bank,
+        velocity_world_x: sample.velocity.world_x,
+        velocity_world_y: sample.velocity.world_y,
+        velocity_world_z: sample.velocity.world_z,
+        velocity_body_x: sample.velocity.body_x,
+        velocity_body_y: sample.velocity.body_y,
+        velocity_body_z: sample.velocity.body_z,
         ..AircraftState::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use msfs_replay::{Pose, Velocity};
+
+    #[test]
+    fn replay_samples_preserve_recorded_velocities() {
+        let state = state_from_sample(Sample {
+            pose: Pose {
+                latitude: 47.0,
+                longitude: 8.0,
+                altitude: 1_400.0,
+                pitch: 1.0,
+                bank: 2.0,
+                heading: 3.0,
+            },
+            velocity: Velocity {
+                world_x: 4.0,
+                world_y: 5.0,
+                world_z: 6.0,
+                body_x: 7.0,
+                body_y: 8.0,
+                body_z: 9.0,
+            },
+        });
+
+        assert_eq!(state.velocity_world_x, 4.0);
+        assert_eq!(state.velocity_world_y, 5.0);
+        assert_eq!(state.velocity_world_z, 6.0);
+        assert_eq!(state.velocity_body_x, 7.0);
+        assert_eq!(state.velocity_body_y, 8.0);
+        assert_eq!(state.velocity_body_z, 9.0);
     }
 }

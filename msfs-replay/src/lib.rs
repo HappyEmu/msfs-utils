@@ -56,27 +56,83 @@ pub struct TimedPose {
     pub pose: Pose,
 }
 
+/// Linear aircraft velocities in feet per second.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Velocity {
+    pub world_x: f64,
+    pub world_y: f64,
+    pub world_z: f64,
+    pub body_x: f64,
+    pub body_y: f64,
+    pub body_z: f64,
+}
+
+impl Velocity {
+    fn interpolate(self, other: Self, amount: f64) -> Self {
+        Self {
+            world_x: lerp(self.world_x, other.world_x, amount),
+            world_y: lerp(self.world_y, other.world_y, amount),
+            world_z: lerp(self.world_z, other.world_z, amount),
+            body_x: lerp(self.body_x, other.body_x, amount),
+            body_y: lerp(self.body_y, other.body_y, amount),
+            body_z: lerp(self.body_z, other.body_z, amount),
+        }
+    }
+
+    fn is_finite(self) -> bool {
+        [
+            self.world_x,
+            self.world_y,
+            self.world_z,
+            self.body_x,
+            self.body_y,
+            self.body_z,
+        ]
+        .into_iter()
+        .all(f64::is_finite)
+    }
+}
+
+/// An interpolated pose and its corresponding linear velocities.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Sample {
+    pub pose: Pose,
+    pub velocity: Velocity,
+}
+
 /// A validated recording with timestamps normalized to begin at zero.
 #[derive(Clone, Debug)]
 pub struct Recording {
     samples: Vec<TimedPose>,
+    velocities: Vec<Velocity>,
 }
 
 impl Recording {
     /// Construct a recording from timestamped samples.
-    pub fn new(mut samples: Vec<TimedPose>) -> Result<Self, RecordingError> {
+    pub fn new(samples: Vec<TimedPose>) -> Result<Self, RecordingError> {
+        let velocities = vec![Velocity::default(); samples.len()];
+        Self::new_with_velocities(samples, velocities)
+    }
+
+    fn new_with_velocities(
+        mut samples: Vec<TimedPose>,
+        velocities: Vec<Velocity>,
+    ) -> Result<Self, RecordingError> {
         if samples.len() < 2 {
             return Err(RecordingError::NotEnoughSamples);
         }
 
         let origin = samples[0].seconds;
-        if !origin.is_finite() || !samples[0].pose.is_finite() {
+        if !origin.is_finite() || !samples[0].pose.is_finite() || !velocities[0].is_finite() {
             return Err(RecordingError::InvalidSample { index: 0 });
         }
 
         for (index, pair) in samples.windows(2).enumerate() {
             let next_index = index + 1;
-            if !pair[1].seconds.is_finite() || !pair[1].pose.is_finite() {
+            if !pair[1].seconds.is_finite()
+                || !pair[1].pose.is_finite()
+                || !velocities[next_index].is_finite()
+            {
                 return Err(RecordingError::InvalidSample { index: next_index });
             }
             if pair[1].seconds <= pair[0].seconds {
@@ -90,7 +146,10 @@ impl Recording {
                 return Err(RecordingError::InvalidSample { index });
             }
         }
-        Ok(Self { samples })
+        Ok(Self {
+            samples,
+            velocities,
+        })
     }
 
     /// Read a recording from a CSV file.
@@ -101,12 +160,13 @@ impl Recording {
 
     /// Read CSV data from any byte stream.
     ///
-    /// The expected columns are `timestamp_seconds`, `latitude_degrees`,
-    /// `longitude_degrees`, `altitude_feet`, `pitch_degrees`, `bank_degrees`,
-    /// and `heading_degrees`. A header row is optional. Blank lines and lines
-    /// beginning with `#` are ignored.
+    /// The expected columns are the headerless 13-column format recorded by
+    /// the original `fsmp` prototype: elapsed time, position, world velocity,
+    /// attitude, and body velocity. Blank lines and lines beginning with `#`
+    /// are ignored.
     pub fn from_csv_reader(reader: impl Read) -> Result<Self, RecordingError> {
         let mut samples = Vec::new();
+        let mut velocities = Vec::new();
         for (line_index, line) in BufReader::new(reader).lines().enumerate() {
             let line_number = line_index + 1;
             let line = line.map_err(RecordingError::Io)?;
@@ -114,20 +174,11 @@ impl Recording {
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            if samples.is_empty()
-                && line
-                    .split(',')
-                    .next()
-                    .is_some_and(|column| column.trim().eq_ignore_ascii_case("timestamp_seconds"))
-            {
-                continue;
-            }
-
             let columns: Vec<_> = line.split(',').map(str::trim).collect();
-            if columns.len() != 7 {
+            if columns.len() != 13 {
                 return Err(RecordingError::InvalidCsv {
                     line: line_number,
-                    message: format!("expected 7 columns, found {}", columns.len()),
+                    message: format!("expected 13 columns, found {}", columns.len()),
                 });
             }
 
@@ -145,13 +196,21 @@ impl Recording {
                     latitude: value(1)?,
                     longitude: value(2)?,
                     altitude: value(3)?,
-                    pitch: value(4)?,
-                    bank: value(5)?,
-                    heading: value(6)?,
+                    pitch: value(7)?,
+                    bank: value(8)?,
+                    heading: value(9)?,
                 },
             });
+            velocities.push(Velocity {
+                world_x: value(4)?,
+                world_y: value(5)?,
+                world_z: value(6)?,
+                body_x: value(10)?,
+                body_y: value(11)?,
+                body_z: value(12)?,
+            });
         }
-        Self::new(samples)
+        Self::new_with_velocities(samples, velocities)
     }
 
     /// Duration of the normalized recording in seconds.
@@ -164,24 +223,38 @@ impl Recording {
     /// Returns `None` after the end of the recording. Values at or before zero
     /// return the first pose.
     pub fn sample(&self, seconds: f64) -> Option<Pose> {
+        self.sample_with_velocity(seconds).map(|sample| sample.pose)
+    }
+
+    /// Interpolate the pose and velocities at a normalized recording timestamp.
+    pub fn sample_with_velocity(&self, seconds: f64) -> Option<Sample> {
         if !seconds.is_finite() || seconds > self.duration_seconds() {
             return None;
         }
         if seconds <= 0.0 {
-            return self.samples.first().map(|sample| sample.pose);
+            return Some(Sample {
+                pose: self.samples.first()?.pose,
+                velocity: self.velocities[0],
+            });
         }
 
         let upper = self
             .samples
             .partition_point(|sample| sample.seconds <= seconds);
         if upper == self.samples.len() {
-            return self.samples.last().map(|sample| sample.pose);
+            return Some(Sample {
+                pose: self.samples.last()?.pose,
+                velocity: *self.velocities.last()?,
+            });
         }
 
         let before = self.samples[upper - 1];
         let after = self.samples[upper];
         let amount = (seconds - before.seconds) / (after.seconds - before.seconds);
-        Some(before.pose.interpolate(after.pose, amount))
+        Some(Sample {
+            pose: before.pose.interpolate(after.pose, amount),
+            velocity: self.velocities[upper - 1].interpolate(self.velocities[upper], amount),
+        })
     }
 }
 
@@ -349,15 +422,21 @@ mod tests {
     #[test]
     fn parses_and_normalizes_csv_timestamps() {
         let recording = Recording::from_csv_reader(
-            b"timestamp_seconds,latitude_degrees,longitude_degrees,altitude_feet,pitch_degrees,bank_degrees,heading_degrees\n\
-              10,1,2,3,4,5,6\n\
-              12,2,3,4,5,6,7\n"
+            b"10,1,2,3,40,50,60,4,5,6,70,80,90\n\
+              12,2,3,4,42,52,62,5,6,7,72,82,92\n"
                 .as_slice(),
         )
         .unwrap();
 
         assert_eq!(recording.duration_seconds(), 2.0);
-        assert_eq!(recording.sample(0.0).unwrap().latitude, 1.0);
+        let first = recording.sample_with_velocity(0.0).unwrap();
+        assert_eq!(first.pose.pitch, 4.0);
+        assert_eq!(first.pose.bank, 5.0);
+        assert_eq!(first.pose.heading, 6.0);
+        let middle = recording.sample_with_velocity(1.0).unwrap();
+        assert_eq!(middle.pose.latitude, 1.5);
+        assert_eq!(middle.velocity.world_x, 41.0);
+        assert_eq!(middle.velocity.body_z, 91.0);
     }
 
     #[test]
@@ -444,8 +523,12 @@ mod tests {
         let shape = Recording::from_csv_reader(b"0,1,2\n1,2,3\n".as_slice()).unwrap_err();
         assert!(matches!(shape, RecordingError::InvalidCsv { line: 1, .. }));
 
-        let value = Recording::from_csv_reader(b"0,1,2,3,4,5,nope\n1,2,3,4,5,6,7\n".as_slice())
-            .unwrap_err();
+        let value = Recording::from_csv_reader(
+            b"0,1,2,3,4,5,nope,7,8,9,10,11,12\n\
+              1,2,3,4,5,6,7,8,9,10,11,12,13\n"
+                .as_slice(),
+        )
+        .unwrap_err();
         assert!(matches!(value, RecordingError::InvalidCsv { line: 1, .. }));
     }
 
