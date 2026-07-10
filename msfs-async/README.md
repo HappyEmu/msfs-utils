@@ -102,6 +102,31 @@ is the number of datums, and scalar payload fields are packed without C alignmen
 padding. The driver remains independent of the disputed count semantics because
 it uses `dwSize` and the registered Rust type size for bounds validation.
 
+## Live simulator tests
+
+The ignored `live_simconnect` integration suite exercises behavior which a fake
+backend cannot validate: opening the installed SDK, requesting mixed live data,
+writing and reading an L-variable, native subscription limits under a full local
+buffer, padded client-data exchange between two sessions, shared-handle shutdown,
+and optional AI-aircraft creation/removal.
+
+Start MSFS and fully load a flight, then run the suite serially:
+
+```console
+cargo test -p msfs-async --test live_simconnect -- --ignored --test-threads=1 --nocapture
+```
+
+Normal `cargo test` runs skip these tests. The AI lifecycle test defaults to
+`Airbus A320 Neo Asobo`. Override it with another exact installed container
+title when necessary:
+
+```powershell
+$env:MSFS_TEST_AIRCRAFT_TITLE = "Airbus A320 Neo Asobo"
+```
+
+Use a dedicated test flight: the suite writes `L:MSFS_ASYNC_LIVE_TEST_VALUE`,
+creates a named client-data area, and creates and removes an AI aircraft.
+
 ## Examples
 
 - [`request_once.rs`](examples/request_once.rs) awaits several typed one-shot
