@@ -94,7 +94,8 @@ the simulator and SimConnect versions, `dwSize`, `dwDefineCount`, payload length
 raw bytes, packed-offset values, and C-aligned-offset values. Preserve that
 output when checking a new SDK version.
 
-A live Windows/MSFS run on 2026-07-10 returned `dwSize = 56`,
+A live Windows run on 2026-07-10 with simulator `SunRise 12.2` build
+`282174.999` and SimConnect `12.2` build `0.0` returned `dwSize = 56`,
 `dwDefineCount = 3`, and a 16-byte payload. The three values decoded correctly
 at packed offsets 0, 4, and 12. This matches the distributed header: the count
 is the number of datums, and scalar payload fields are packed without C alignment
