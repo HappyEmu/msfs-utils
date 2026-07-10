@@ -21,6 +21,17 @@ pub struct InterpolationBuffer {
     samples: VecDeque<AircraftUpdate>,
 }
 
+/// A state sampled from the delayed sender timeline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PlaybackSample {
+    /// Sender timestamp targeted by the receiver's delayed playback clock.
+    pub timestamp_seconds: f64,
+    /// Interpolated state, or the newest state held during an underrun.
+    pub state: AircraftState,
+    /// Whether two samples bracketed the playback timestamp.
+    pub underrun: bool,
+}
+
 impl InterpolationBuffer {
     /// Create a buffer with a fixed playback delay.
     pub fn new(delay: Duration) -> Self {
@@ -103,6 +114,39 @@ impl InterpolationBuffer {
         Some(interpolate_state(first.state, second.state, amount))
     }
 
+    /// Sample only after two updates can establish delayed playback.
+    ///
+    /// Once playback has started, the newest state is held if the playback
+    /// clock runs beyond the available samples. The returned timestamp always
+    /// describes the requested sender playback time, including during a hold.
+    pub fn sample_buffered(&mut self, now: Duration) -> Option<PlaybackSample> {
+        let timestamp_seconds = self.playback_timestamp(now)?;
+        while self.samples.len() >= 3 && self.samples[1].timestamp_seconds <= timestamp_seconds {
+            self.samples.pop_front();
+        }
+
+        let first = *self.samples.front()?;
+        let second = *self.samples.get(1)?;
+        if timestamp_seconds < first.timestamp_seconds {
+            return None;
+        }
+        if timestamp_seconds > second.timestamp_seconds {
+            return Some(PlaybackSample {
+                timestamp_seconds,
+                state: second.state,
+                underrun: true,
+            });
+        }
+
+        let amount = (timestamp_seconds - first.timestamp_seconds)
+            / (second.timestamp_seconds - first.timestamp_seconds);
+        Some(PlaybackSample {
+            timestamp_seconds,
+            state: interpolate_state(first.state, second.state, amount),
+            underrun: false,
+        })
+    }
+
     /// Return the sender timestamp currently targeted by playback.
     pub fn playback_timestamp(&self, now: Duration) -> Option<f64> {
         self.clock_offset_seconds
@@ -120,7 +164,8 @@ impl InterpolationBuffer {
     }
 }
 
-fn interpolate_state(start: AircraftState, end: AircraftState, amount: f64) -> AircraftState {
+/// Interpolate all continuous aircraft fields and choose the nearest ground state.
+pub fn interpolate_state(start: AircraftState, end: AircraftState, amount: f64) -> AircraftState {
     let amount = amount.clamp(0.0, 1.0);
     let pose = Pose {
         latitude: start.latitude,
@@ -235,5 +280,28 @@ mod tests {
                 .abs()
                 < 1e-9
         );
+    }
+
+    #[test]
+    fn buffered_sampling_waits_for_a_bracket_and_reports_underruns() {
+        let mut buffer = InterpolationBuffer::new(Duration::from_millis(100));
+        assert!(buffer.push(update(1, 1.0, 10.0, 20.0), Duration::from_millis(1_050)));
+        assert!(
+            buffer
+                .sample_buffered(Duration::from_millis(1_150))
+                .is_none()
+        );
+
+        assert!(buffer.push(update(2, 1.1, 20.0, 30.0), Duration::from_millis(1_160)));
+        let bracketed = buffer
+            .sample_buffered(Duration::from_millis(1_200))
+            .unwrap();
+        assert!(!bracketed.underrun);
+        assert!((bracketed.state.latitude - 15.0).abs() < 1e-9);
+
+        let held = buffer.sample_buffered(Duration::from_secs(2)).unwrap();
+        assert!(held.underrun);
+        assert_eq!(held.state.latitude, 20.0);
+        assert!(held.timestamp_seconds > 1.1);
     }
 }

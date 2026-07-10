@@ -7,6 +7,8 @@ mod replay;
 mod server;
 #[cfg(windows)]
 mod simconnect;
+#[cfg(any(windows, test))]
+mod timeline;
 
 use std::error::Error;
 use std::io;

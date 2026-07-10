@@ -36,24 +36,27 @@ cargo run -p msfs-multiplayer --example interpolation
 
 The example generates 10 Hz sender samples with variable arrival delay and
 resamples them at 60 Hz through a 150 ms interpolation buffer. It prints CSV so
-the rendered motion and buffer occupancy can be inspected or plotted. The live
-client does not use this buffer yet.
+the rendered motion and buffer occupancy can be inspected or plotted.
 
 The relay uses versioned UDP datagrams, rejects stale per-user updates, excludes
 the receiving user from snapshots, and expires silent clients after ten
-seconds. The live client shares only the newest local state and remote snapshot,
-so slow SimConnect operations do not build an unbounded queue of stale poses.
+seconds. The live client buffers every accepted update per remote user,
+estimates sender clock offset, and renders a 30 Hz timeline with a fixed 500 ms
+playout delay. Only the newest rendered snapshot crosses into the SimConnect
+worker, so slow operations do not build an unbounded queue of stale poses.
 Replay clients preserve the original `fsmp` recording's world and body
 velocities. The SimConnect injector leaves released remote aircraft unfrozen,
 sets their recorded attitude and body velocities, and lets the simulator move
 them without subsequent latitude, longitude, or altitude corrections.
-For each remote user, the live client reads the simulator's actual position
-through a non-blocking once-per-second subscription and logs horizontal, signed
-vertical, and total 3D drift from the latest received position.
+For each remote user, the live client reads position and simulator absolute time
+through a non-blocking once-per-second subscription. It aligns that measurement
+with buffered target history on the simulator clock, then logs along-track,
+cross-track, signed vertical, and total 3D error. Positive along-track means
+ahead of the expected course; positive cross-track means to the right.
 The relay currently encodes one complete snapshot per recipient every 33 ms,
 making its snapshot work quadratic in the number of connected users; it is
 intended for small prototype sessions, not large deployments.
 
-This remains a prototype. It has no authentication, congestion control, model
-matching, clock synchronization, or interpolation buffer. Every remote user is
-rendered with the container title supplied to `client`.
+This remains a prototype. It has no authentication, congestion control, or
+model matching. Every remote user is rendered with the container title supplied
+to `client`.

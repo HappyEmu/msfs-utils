@@ -1,7 +1,8 @@
 use crate::DynError;
-use crate::drift::position_drift;
-use crate::live::{LatestLocalState, LatestRemoteSnapshot};
-use crate::protocol::{AircraftState, AircraftUpdate, UserId};
+use crate::drift::aligned_drift;
+use crate::live::{LatestLocalState, LatestRemoteSnapshot, RenderedAircraftUpdate};
+use crate::protocol::{AircraftState, UserId};
+use crate::timeline::{TargetSample, TargetTimeline};
 use msfs_sync::{
     AiAircraft, InitialPosition, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect,
     Subscription, SubscriptionOptions, data_definition,
@@ -13,6 +14,9 @@ use std::time::Duration;
 #[data_definition]
 #[derive(Debug)]
 struct UserAircraftData {
+    #[name = "ABSOLUTE TIME"]
+    #[unit = "Seconds"]
+    absolute_time: f64,
     #[name = "PLANE LATITUDE"]
     #[unit = "Degrees"]
     #[epsilon = 0.000001]
@@ -96,6 +100,9 @@ struct RemoteAircraftData {
 #[data_definition]
 #[derive(Debug)]
 struct RemoteAircraftPosition {
+    #[name = "ABSOLUTE TIME"]
+    #[unit = "Seconds"]
+    absolute_time: f64,
     #[name = "PLANE LATITUDE"]
     #[unit = "Degrees"]
     latitude: f64,
@@ -109,8 +116,9 @@ struct RemoteAircraftPosition {
 
 struct RemoteAircraft {
     handle: AiAircraft,
-    expected: AircraftState,
     drift_updates: Option<Subscription<RemoteAircraftPosition>>,
+    target_history: TargetTimeline,
+    pending_actual: Option<RemoteAircraftPosition>,
 }
 
 pub fn run(
@@ -125,9 +133,13 @@ pub fn run(
     )?;
     let mut exceptions = sim.exceptions()?;
     let mut aircraft = HashMap::<UserId, RemoteAircraft>::new();
+    let mut receiver_absolute_time = None;
 
     loop {
         while let Some(update) = user_updates.try_recv()? {
+            if update.absolute_time.is_finite() {
+                receiver_absolute_time = Some(update.absolute_time);
+            }
             *local_state
                 .lock()
                 .unwrap_or_else(|error| error.into_inner()) = Some(update.into());
@@ -142,7 +154,13 @@ pub fn run(
             .unwrap_or_else(|error| error.into_inner())
             .take();
         if let Some(snapshot) = snapshot {
-            reconcile(&sim, model_title, &mut aircraft, &snapshot)?;
+            reconcile(
+                &sim,
+                model_title,
+                &mut aircraft,
+                &snapshot,
+                receiver_absolute_time,
+            )?;
         }
 
         std::thread::sleep(Duration::from_millis(5));
@@ -153,7 +171,8 @@ fn reconcile(
     sim: &SimConnect,
     model_title: &str,
     aircraft: &mut HashMap<UserId, RemoteAircraft>,
-    snapshot: &[AircraftUpdate],
+    snapshot: &[RenderedAircraftUpdate],
+    receiver_absolute_time: Option<f64>,
 ) -> Result<(), DynError> {
     let present = snapshot
         .iter()
@@ -184,8 +203,9 @@ fn reconcile(
                 update.user_id,
                 RemoteAircraft {
                     handle: created,
-                    expected: update.state,
                     drift_updates: Some(drift_updates),
+                    target_history: TargetTimeline::default(),
+                    pending_actual: None,
                 },
             );
         }
@@ -193,7 +213,18 @@ fn reconcile(
         let remote = aircraft
             .get_mut(&update.user_id)
             .expect("the remote aircraft was just created or already existed");
-        remote.expected = update.state;
+        if let Some(receiver_absolute_time) = receiver_absolute_time {
+            let reset = remote.target_history.record(TargetSample {
+                receiver_absolute_time,
+                playback_timestamp_seconds: update.playback_timestamp_seconds,
+                expected: update.state,
+                buffer_depth: update.buffer_depth,
+                underrun: update.underrun,
+            });
+            if reset {
+                remote.pending_actual = None;
+            }
+        }
         let object_id = remote.handle.object_id();
         sim.set_data_on_sim_object(object_id, &RemoteAircraftData::from(update.state))?;
     }
@@ -222,20 +253,9 @@ fn log_ready_drifts(aircraft: &mut HashMap<UserId, RemoteAircraft>) {
         };
         match drift_updates.try_recv() {
             Ok(Some(actual)) => {
-                let expected = remote.expected;
-                let drift = position_drift(
-                    expected.latitude,
-                    expected.longitude,
-                    expected.altitude,
-                    actual.latitude,
-                    actual.longitude,
-                    actual.altitude,
-                );
-                let _ = writeln!(
-                    output,
-                    "Remote user {user_id} drift: horizontal={:.1} ft vertical={:+.1} ft total={:.1} ft",
-                    drift.horizontal_feet, drift.vertical_feet, drift.total_feet,
-                );
+                if actual.absolute_time.is_finite() {
+                    remote.pending_actual = Some(actual);
+                }
             }
             Ok(None) => {}
             Err(error) => {
@@ -246,6 +266,47 @@ fn log_ready_drifts(aircraft: &mut HashMap<UserId, RemoteAircraft>) {
                 remote.drift_updates = None;
             }
         }
+
+        let Some(actual) = remote.pending_actual.as_ref() else {
+            continue;
+        };
+        if remote
+            .target_history
+            .oldest_time()
+            .is_some_and(|oldest| actual.absolute_time < oldest)
+        {
+            remote.pending_actual = None;
+            continue;
+        }
+        let Some(expected) = remote.target_history.sample(actual.absolute_time) else {
+            continue;
+        };
+        let drift = aligned_drift(
+            expected.expected.latitude,
+            expected.expected.longitude,
+            expected.expected.altitude,
+            expected.expected.heading,
+            actual.latitude,
+            actual.longitude,
+            actual.altitude,
+        );
+        let measurement_age_ms = remote
+            .target_history
+            .latest_time()
+            .map(|latest| (latest - actual.absolute_time).max(0.0) * 1_000.0)
+            .unwrap_or(0.0);
+        let _ = writeln!(
+            output,
+            "user={user_id} age={measurement_age_ms:.0}ms along={:+.1}ft cross={:+.1}ft vertical={:+.1}ft total={:.1}ft playback={:.3}s depth={} underrun={}",
+            drift.along_track_feet,
+            drift.cross_track_feet,
+            drift.vertical_feet,
+            drift.total_feet,
+            expected.playback_timestamp_seconds,
+            expected.buffer_depth,
+            expected.underrun,
+        );
+        remote.pending_actual = None;
     }
     if !output.is_empty() {
         eprint!("{output}");
