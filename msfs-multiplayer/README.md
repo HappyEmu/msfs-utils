@@ -46,10 +46,11 @@ playout delay. Only the newest rendered snapshot crosses into the SimConnect
 worker, so slow operations do not build an unbounded queue of stale poses.
 Replay clients preserve the original `fsmp` recording's world and body
 velocities. The SimConnect injector leaves released remote aircraft unfrozen,
-creates them on a dedicated worker, and aligns each assigned object once to a
-fresh buffered target before activation. It then sets only recorded attitude
-and body velocities and lets the simulator move them without subsequent
-latitude, longitude, or altitude corrections.
+creates them on a dedicated worker, and aligns each assigned object to a fresh
+buffered target after its position, altitude, and attitude freeze states are
+confirmed. It activates velocity-only playback after confirming those states
+are unfrozen again, with no subsequent latitude, longitude, or altitude
+corrections.
 For each remote user, the live client reads position and simulator absolute time
 through a non-blocking once-per-second subscription. It aligns that measurement
 with buffered target history on the simulator clock, then logs along-track,

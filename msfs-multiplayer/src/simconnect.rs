@@ -4,8 +4,8 @@ use crate::live::{LatestLocalState, LatestRemoteSnapshot, RenderedAircraftUpdate
 use crate::protocol::{AircraftState, UserId};
 use crate::timeline::{TargetSample, TargetTimeline};
 use msfs_sync::{
-    AiAircraft, Error, InitialPosition, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER, SimConnect,
-    Subscription, SubscriptionOptions, data_definition,
+    AiAircraft, Error, FreezeState, InitialPosition, RecurringPeriod, SIMCONNECT_OBJECT_ID_USER,
+    SimConnect, Subscription, SubscriptionOptions, data_definition,
 };
 use std::collections::{HashMap, HashSet};
 use std::fmt::Write;
@@ -148,6 +148,30 @@ struct RemoteAircraftPosition {
     altitude: f64,
 }
 
+#[data_definition]
+#[derive(Debug)]
+struct RemoteAircraftFreezeState {
+    #[name = "IS LATITUDE LONGITUDE FREEZE ON"]
+    #[unit = "Bool"]
+    latitude_longitude: i64,
+    #[name = "IS ALTITUDE FREEZE ON"]
+    #[unit = "Bool"]
+    altitude: i64,
+    #[name = "IS ATTITUDE FREEZE ON"]
+    #[unit = "Bool"]
+    attitude: i64,
+}
+
+impl RemoteAircraftFreezeState {
+    fn all_frozen(&self) -> bool {
+        self.latitude_longitude != 0 && self.altitude != 0 && self.attitude != 0
+    }
+
+    fn all_unfrozen(&self) -> bool {
+        self.latitude_longitude == 0 && self.altitude == 0 && self.attitude == 0
+    }
+}
+
 struct RemoteAircraft {
     handle: AiAircraft,
     drift_updates: Option<Subscription<RemoteAircraftPosition>>,
@@ -171,9 +195,23 @@ struct CreationWorker {
     desired_users: Arc<Mutex<HashSet<UserId>>>,
 }
 
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum AlignmentPhase {
+    WaitingForFreeze,
+    WaitingForUnfreeze,
+    Ready,
+}
+
+struct AligningAircraft {
+    handle: AiAircraft,
+    freeze_updates: Subscription<RemoteAircraftFreezeState>,
+    phase: AlignmentPhase,
+}
+
 struct RemoteFleet {
     aircraft: HashMap<UserId, RemoteAircraft>,
     awaiting_alignment: HashMap<UserId, AiAircraft>,
+    aligning: HashMap<UserId, AligningAircraft>,
     pending_creations: HashSet<UserId>,
     desired_users: HashSet<UserId>,
     creation_worker: CreationWorker,
@@ -255,6 +293,7 @@ pub fn run(
     let mut fleet = RemoteFleet {
         aircraft: HashMap::new(),
         awaiting_alignment: HashMap::new(),
+        aligning: HashMap::new(),
         pending_creations: HashSet::new(),
         desired_users: HashSet::new(),
         creation_worker: CreationWorker::spawn(sim.clone(), model_title.to_owned())?,
@@ -305,12 +344,38 @@ fn reconcile(
         if !update.state.is_finite() {
             continue;
         }
-        if receiver_absolute_time.is_some()
-            && let Some(created) = fleet.awaiting_alignment.remove(&update.user_id)
-        {
-            let object_id = created.object_id();
-            sim.release_ai_control(object_id)?;
-            sim.set_data_on_sim_object(object_id, &RemoteAircraftPlacement::from(update.state))?;
+        let mut alignment_ready = false;
+        if let Some(aligning) = fleet.aligning.get_mut(&update.user_id) {
+            if let Some(freeze) = aligning.freeze_updates.try_recv()? {
+                match aligning.phase {
+                    AlignmentPhase::WaitingForFreeze if freeze.all_frozen() => {
+                        let object_id = aligning.handle.object_id();
+                        sim.set_data_on_sim_object(
+                            object_id,
+                            &RemoteAircraftPlacement::from(update.state),
+                        )?;
+                        sim.set_freeze(object_id, FreezeState::NONE)?;
+                        aligning.phase = AlignmentPhase::WaitingForUnfreeze;
+                        eprintln!(
+                            "Positioned remote user {} as object {} at playback {:.3}s; awaiting unfreeze.",
+                            update.user_id, object_id, update.playback_timestamp_seconds,
+                        );
+                    }
+                    AlignmentPhase::WaitingForUnfreeze if freeze.all_unfrozen() => {
+                        aligning.phase = AlignmentPhase::Ready;
+                    }
+                    _ => {}
+                }
+            }
+            alignment_ready =
+                aligning.phase == AlignmentPhase::Ready && receiver_absolute_time.is_some();
+        }
+        if alignment_ready {
+            let aligning = fleet
+                .aligning
+                .remove(&update.user_id)
+                .expect("the alignment was just confirmed ready");
+            let object_id = aligning.handle.object_id();
             let drift_updates = sim.subscribe_with_options::<RemoteAircraftPosition>(
                 object_id,
                 SubscriptionOptions::new(RecurringPeriod::Second).latest(),
@@ -322,12 +387,42 @@ fn reconcile(
             fleet.aircraft.insert(
                 update.user_id,
                 RemoteAircraft {
-                    handle: created,
+                    handle: aligning.handle,
                     drift_updates: Some(drift_updates),
                     target_history: TargetTimeline::default(),
                     pending_actual: None,
                 },
             );
+        }
+
+        if let Some(created) = fleet.awaiting_alignment.remove(&update.user_id) {
+            let object_id = created.object_id();
+            sim.release_ai_control(object_id)?;
+            let freeze_updates = sim.subscribe_with_options::<RemoteAircraftFreezeState>(
+                object_id,
+                SubscriptionOptions::new(RecurringPeriod::SimFrame).latest(),
+            )?;
+            sim.set_freeze(object_id, FreezeState::ALL)?;
+            fleet.aligning.insert(
+                update.user_id,
+                AligningAircraft {
+                    handle: created,
+                    freeze_updates,
+                    phase: AlignmentPhase::WaitingForFreeze,
+                },
+            );
+            eprintln!(
+                "Freezing remote user {} as object {} before alignment.",
+                update.user_id, object_id,
+            );
+            continue;
+        }
+
+        if fleet.aligning.contains_key(&update.user_id) {
+            continue;
+        }
+        if fleet.awaiting_alignment.contains_key(&update.user_id) {
+            continue;
         }
 
         if !fleet.aircraft.contains_key(&update.user_id) {
@@ -389,6 +484,20 @@ fn reconcile(
             .expect("the object ID came from this map");
         sim.remove_object(object.object_id())?;
         eprintln!("Removed unaligned remote user {user_id}.");
+    }
+    let positioning_removed = fleet
+        .aligning
+        .keys()
+        .copied()
+        .filter(|user_id| !present.contains(user_id))
+        .collect::<Vec<_>>();
+    for user_id in positioning_removed {
+        let object = fleet
+            .aligning
+            .remove(&user_id)
+            .expect("the object ID came from this map");
+        sim.remove_object(object.handle.object_id())?;
+        eprintln!("Removed positioning remote user {user_id}.");
     }
     log_ready_drifts(&mut fleet.aircraft);
     Ok(())
