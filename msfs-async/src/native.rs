@@ -1,7 +1,7 @@
 use crate::backend::{
     ClientDataPeriod, ClientDataRequest, DataPeriod, DataRequest, SimConnectBackend,
 };
-use crate::{Error, Result};
+use crate::{Error, InitialPosition, Result};
 use msfs::sys;
 use std::ffi::CStr;
 use windows_sys::Win32::Foundation::HANDLE;
@@ -14,6 +14,7 @@ const _: () = {
     assert!(std::mem::size_of::<sys::SIMCONNECT_RECV>() == 12);
     assert!(std::mem::offset_of!(sys::SIMCONNECT_RECV_SIMOBJECT_DATA, dwData) == 40);
     assert!(std::mem::size_of::<sys::SIMCONNECT_RECV_EXCEPTION>() == 24);
+    assert!(std::mem::size_of::<sys::SIMCONNECT_RECV_ASSIGNED_OBJECT_ID>() == 20);
 };
 
 // SAFETY: the backend is created, used, and dropped on the dedicated driver
@@ -31,6 +32,8 @@ impl SimConnectBackend for NativeBackend {
     const RECV_ID_SIMOBJECT_DATA_BYTYPE: u32 =
         sys::SIMCONNECT_RECV_ID_SIMCONNECT_RECV_ID_SIMOBJECT_DATA_BYTYPE as u32;
     const RECV_ID_CLIENT_DATA: u32 = sys::SIMCONNECT_RECV_ID_SIMCONNECT_RECV_ID_CLIENT_DATA as u32;
+    const RECV_ID_ASSIGNED_OBJECT_ID: u32 =
+        sys::SIMCONNECT_RECV_ID_SIMCONNECT_RECV_ID_ASSIGNED_OBJECT_ID as u32;
 
     fn open(name: &CStr, event: HANDLE) -> Result<Self> {
         let mut handle = unsafe { std::mem::zeroed() };
@@ -69,6 +72,38 @@ impl SimConnectBackend for NativeBackend {
         check_hresult(unsafe {
             sys::SimConnect_AIReleaseControl(self.handle, object_id, request_id)
         })
+    }
+
+    fn create_non_atc_aircraft(
+        &mut self,
+        container_title: &CStr,
+        tail_number: &CStr,
+        initial_position: InitialPosition,
+        request_id: u32,
+    ) -> Result<()> {
+        let initial_position = sys::SIMCONNECT_DATA_INITPOSITION {
+            Latitude: initial_position.latitude,
+            Longitude: initial_position.longitude,
+            Altitude: initial_position.altitude,
+            Pitch: initial_position.pitch,
+            Bank: initial_position.bank,
+            Heading: initial_position.heading,
+            OnGround: u32::from(initial_position.on_ground),
+            Airspeed: initial_position.airspeed,
+        };
+        check_hresult(unsafe {
+            sys::SimConnect_AICreateNonATCAircraft(
+                self.handle,
+                container_title.as_ptr(),
+                tail_number.as_ptr(),
+                initial_position,
+                request_id,
+            )
+        })
+    }
+
+    fn remove_object(&mut self, object_id: u32, request_id: u32) -> Result<()> {
+        check_hresult(unsafe { sys::SimConnect_AIRemoveObject(self.handle, object_id, request_id) })
     }
 
     fn transmit_client_event(&mut self, object_id: u32, event_id: u32, data: u32) -> Result<()> {

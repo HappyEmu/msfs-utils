@@ -39,6 +39,10 @@ path = "examples/relay_simobject.rs"
 name = "sync_replay_simobject"
 path = "examples/replay_simobject.rs"
 
+[[example]]
+name = "sync_spawn_aircraft"
+path = "examples/spawn_aircraft.rs"
+
 [dev-dependencies]
 msfs-replay = { path = "../msfs-replay", version = "0.1.0" }
 

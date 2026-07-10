@@ -8,7 +8,7 @@ use crate::client_layout;
 use crate::latest::Sender as LatestSender;
 use crate::packet::decode_value;
 use crate::routing::Registry;
-use crate::{Error, FreezeState, Result, ServerException};
+use crate::{AiAircraft, Error, FreezeState, InitialPosition, Result, ServerException};
 use futures_channel::{mpsc, oneshot};
 use std::any::TypeId;
 use std::collections::HashMap;
@@ -18,12 +18,18 @@ use std::sync::{Arc, Mutex};
 
 const RECV_HEADER_SIZE: usize = 12;
 const EXCEPTION_PACKET_SIZE: usize = 24;
+const ASSIGNED_OBJECT_PACKET_SIZE: usize = 20;
 const DATA_PAYLOAD_OFFSET: usize = 40;
 
 enum DispatchControl {
     Continue,
     QueueEmpty,
     Quit,
+}
+
+enum AssignedObjectAction {
+    AwaitAcknowledgement,
+    RemoveOrphan,
 }
 
 pub(crate) struct DataDefinitionEntry {
@@ -172,6 +178,74 @@ impl<B: SimConnectBackend> Driver<B> {
         request_id: RequestId,
     ) -> Result<()> {
         self.backend.release_ai_control(object_id, request_id)
+    }
+
+    pub(crate) fn create_non_atc_aircraft(
+        &mut self,
+        request_id: RequestId,
+        container_title: &CString,
+        tail_number: &CString,
+        initial_position: InitialPosition,
+        tx: oneshot::Sender<Result<AiAircraft>>,
+    ) {
+        let mut route = Box::new(CreatedObjectRoute {
+            tx: Some(tx),
+            object_id: None,
+            abandoned: false,
+        });
+        if self.requests.contains(request_id) {
+            route.fail(Error::IdExhausted);
+            return;
+        }
+        if let Err(error) = self.backend.create_non_atc_aircraft(
+            container_title,
+            tail_number,
+            initial_position,
+            request_id,
+        ) {
+            route.fail(error);
+            return;
+        }
+
+        let inserted = self
+            .requests
+            .insert(request_id, route, ActiveRequest::ObjectCreation);
+        debug_assert!(inserted);
+        self.remember_last_send_id(request_id);
+    }
+
+    pub(crate) fn remove_object(
+        &mut self,
+        object_id: ObjectId,
+        request_id: RequestId,
+    ) -> Result<()> {
+        self.backend.remove_object(object_id, request_id)
+    }
+
+    pub(crate) fn complete_object_creation(&mut self, request_id: RequestId) {
+        if matches!(
+            self.requests.active(request_id),
+            Some(ActiveRequest::ObjectCreation)
+        ) {
+            self.remove_request(request_id);
+        }
+    }
+
+    pub(crate) fn abandon_object_creation(&mut self, request_id: RequestId) {
+        if !matches!(
+            self.requests.active(request_id),
+            Some(ActiveRequest::ObjectCreation)
+        ) {
+            return;
+        }
+        let object_id = self
+            .requests
+            .route_mut(request_id)
+            .and_then(|route| route.abandon_object_creation());
+        if let Some(object_id) = object_id {
+            self.remove_request(request_id);
+            let _ = self.backend.remove_object(object_id, request_id);
+        }
     }
 
     pub(crate) fn set_freeze(&mut self, object_id: ObjectId, state: FreezeState) -> Result<()> {
@@ -537,7 +611,7 @@ impl<B: SimConnectBackend> Driver<B> {
                 let expected = self
                     .requests
                     .active(request_id)
-                    .map(ActiveRequest::define_id);
+                    .and_then(ActiveRequest::define_id);
                 let remove = match (self.requests.route_mut(request_id), expected) {
                     (Some(route), Some(expected_id)) => {
                         if define_id != expected_id {
@@ -575,6 +649,31 @@ impl<B: SimConnectBackend> Driver<B> {
                     self.remove_request(request_id);
                 }
             }
+            id if id == B::RECV_ID_ASSIGNED_OBJECT_ID => {
+                require_size(packet, ASSIGNED_OBJECT_PACKET_SIZE)?;
+                let request_id = read_u32(packet, 12)?;
+                let object_id = read_u32(packet, 16)?;
+                let is_creation = matches!(
+                    self.requests.active(request_id),
+                    Some(ActiveRequest::ObjectCreation)
+                );
+                let action = if is_creation {
+                    self.requests
+                        .route_mut(request_id)
+                        .map(|route| route.assign_object(object_id))
+                } else {
+                    None
+                };
+                if let Some(action) = action {
+                    if matches!(action, AssignedObjectAction::RemoveOrphan) {
+                        self.remove_request(request_id);
+                        // The caller dropped its creation future after the SDK
+                        // accepted the request. Reuse the now-complete creation
+                        // request ID for best-effort cleanup of the orphan.
+                        let _ = self.backend.remove_object(object_id, request_id);
+                    }
+                }
+            }
             id if id == B::RECV_ID_QUIT => return Ok(DispatchControl::Quit),
             _ => {}
         }
@@ -582,6 +681,13 @@ impl<B: SimConnectBackend> Driver<B> {
     }
 
     pub(crate) fn cancel(&mut self, request_id: RequestId) {
+        if matches!(
+            self.requests.active(request_id),
+            Some(ActiveRequest::ObjectCreation)
+        ) {
+            self.abandon_object_creation(request_id);
+            return;
+        }
         let (_, active) = self.requests.remove(request_id);
         if let Some(active) = active {
             match active {
@@ -619,6 +725,7 @@ impl<B: SimConnectBackend> Driver<B> {
                     });
                 }
                 ActiveRequest::SimObject { .. } => {}
+                ActiveRequest::ObjectCreation => unreachable!("handled before removing the route"),
             }
         }
     }
@@ -642,13 +749,15 @@ enum ActiveRequest {
         client_id: ClientDataId,
         define_id: ClientDefinitionId,
     },
+    ObjectCreation,
 }
 
 impl ActiveRequest {
-    fn define_id(&self) -> u32 {
+    fn define_id(&self) -> Option<u32> {
         match self {
-            Self::SimObject { define_id, .. } => *define_id,
-            Self::ClientData { define_id, .. } => *define_id,
+            Self::SimObject { define_id, .. } => Some(*define_id),
+            Self::ClientData { define_id, .. } => Some(*define_id),
+            Self::ObjectCreation => None,
         }
     }
 }
@@ -657,6 +766,53 @@ trait Route: Send {
     /// Deliver a packet and return whether the route is complete.
     fn deliver(&mut self, packet: &[u8], payload_offset: usize) -> bool;
     fn fail(&mut self, error: Error);
+
+    /// Deliver an assigned object ID and return whether it became orphaned.
+    fn assign_object(&mut self, _object_id: ObjectId) -> AssignedObjectAction {
+        AssignedObjectAction::AwaitAcknowledgement
+    }
+
+    fn abandon_object_creation(&mut self) -> Option<ObjectId> {
+        None
+    }
+}
+
+struct CreatedObjectRoute {
+    tx: Option<oneshot::Sender<Result<AiAircraft>>>,
+    object_id: Option<ObjectId>,
+    abandoned: bool,
+}
+
+impl Route for CreatedObjectRoute {
+    fn deliver(&mut self, _packet: &[u8], _payload_offset: usize) -> bool {
+        false
+    }
+
+    fn fail(&mut self, error: Error) {
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(Err(error));
+        }
+    }
+
+    fn assign_object(&mut self, object_id: ObjectId) -> AssignedObjectAction {
+        self.object_id = Some(object_id);
+        if self.abandoned
+            || self
+                .tx
+                .take()
+                .is_none_or(|tx| tx.send(Ok(AiAircraft::new(object_id))).is_err())
+        {
+            AssignedObjectAction::RemoveOrphan
+        } else {
+            AssignedObjectAction::AwaitAcknowledgement
+        }
+    }
+
+    fn abandon_object_creation(&mut self) -> Option<ObjectId> {
+        self.abandoned = true;
+        self.tx.take();
+        self.object_id
+    }
 }
 
 struct OneShotRoute<T> {

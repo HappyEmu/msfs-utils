@@ -1,6 +1,6 @@
 #![cfg_attr(not(windows), allow(dead_code))]
 
-use crate::Result;
+use crate::{InitialPosition, Result};
 use std::ffi::CStr;
 
 pub(crate) type RequestId = u32;
@@ -64,6 +64,7 @@ pub(crate) trait SimConnectBackend: Send + 'static {
     const RECV_ID_SIMOBJECT_DATA: u32;
     const RECV_ID_SIMOBJECT_DATA_BYTYPE: u32;
     const RECV_ID_CLIENT_DATA: u32;
+    const RECV_ID_ASSIGNED_OBJECT_ID: u32;
 
     fn open(name: &CStr, context: Self::OpenContext) -> Result<Self>
     where
@@ -77,6 +78,16 @@ pub(crate) trait SimConnectBackend: Send + 'static {
     ) -> Result<()>;
 
     fn release_ai_control(&mut self, object_id: ObjectId, request_id: RequestId) -> Result<()>;
+
+    fn create_non_atc_aircraft(
+        &mut self,
+        container_title: &CStr,
+        tail_number: &CStr,
+        initial_position: InitialPosition,
+        request_id: RequestId,
+    ) -> Result<()>;
+
+    fn remove_object(&mut self, object_id: ObjectId, request_id: RequestId) -> Result<()>;
 
     fn transmit_client_event(
         &mut self,

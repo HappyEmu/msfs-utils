@@ -42,6 +42,49 @@ pub use windows::{
     MappedEventStream, MappedSubscription, Subscription, mapped_event_channel,
 };
 
+/// Initial placement used when creating an AI aircraft.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InitialPosition {
+    /// Latitude in degrees.
+    pub latitude: f64,
+    /// Longitude in degrees.
+    pub longitude: f64,
+    /// Altitude in feet.
+    pub altitude: f64,
+    /// Pitch in degrees.
+    pub pitch: f64,
+    /// Bank in degrees.
+    pub bank: f64,
+    /// True heading in degrees.
+    pub heading: f64,
+    /// Force the aircraft onto the ground when it is created.
+    pub on_ground: bool,
+    /// Initial indicated airspeed in knots.
+    pub airspeed: u32,
+}
+
+/// An AI aircraft created by this SimConnect session.
+///
+/// Dropping this value does not remove the aircraft. Call
+/// `remove_object(aircraft.object_id())` on the client when the aircraft is no
+/// longer needed.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct AiAircraft {
+    object_id: u32,
+}
+
+impl AiAircraft {
+    #[cfg(any(windows, test))]
+    pub(crate) const fn new(object_id: u32) -> Self {
+        Self { object_id }
+    }
+
+    /// Return the SimConnect object ID assigned to this aircraft.
+    pub const fn object_id(self) -> u32 {
+        self.object_id
+    }
+}
+
 /// The position and orientation components controlled by SimConnect freeze events.
 ///
 /// Freezing a component prevents the simulator from immediately overwriting

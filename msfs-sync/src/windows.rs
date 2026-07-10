@@ -1,10 +1,10 @@
 use futures_util::{FutureExt, StreamExt};
 use msfs_async::__sys as sys;
 use msfs_async::{
-    AsyncClientDataDefinition, AsyncDataDefinition, AsyncSimConnect, ClientDataArea, Error,
-    ExceptionStream as AsyncExceptionStream, FreezeState, MappedEventSender, MappedEventStream,
-    MappedSubscription, RecurringPeriod, Result, ServerException,
-    Subscription as AsyncSubscription, SubscriptionOptions, mapped_event_channel,
+    AiAircraft, AsyncClientDataDefinition, AsyncDataDefinition, AsyncSimConnect, ClientDataArea,
+    Error, ExceptionStream as AsyncExceptionStream, FreezeState, InitialPosition,
+    MappedEventSender, MappedEventStream, MappedSubscription, RecurringPeriod, Result,
+    ServerException, Subscription as AsyncSubscription, SubscriptionOptions, mapped_event_channel,
 };
 
 /// A cloneable blocking handle to one SimConnect session.
@@ -42,6 +42,25 @@ impl SimConnect {
         T: AsyncDataDefinition,
     {
         futures_executor::block_on(self.inner.set_data_on_sim_object(object_id, data))
+    }
+
+    /// Create a non-ATC AI aircraft and block until SimConnect assigns its object ID.
+    pub fn create_non_atc_aircraft(
+        &self,
+        container_title: impl Into<String>,
+        tail_number: impl Into<String>,
+        initial_position: InitialPosition,
+    ) -> Result<AiAircraft> {
+        futures_executor::block_on(self.inner.create_non_atc_aircraft(
+            container_title,
+            tail_number,
+            initial_position,
+        ))
+    }
+
+    /// Remove an AI aircraft or other client-created simulation object.
+    pub fn remove_object(&self, object_id: sys::SIMCONNECT_OBJECT_ID) -> Result<()> {
+        futures_executor::block_on(self.inner.remove_object(object_id))
     }
 
     /// Release an object from the simulator's AI controller.

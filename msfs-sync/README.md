@@ -23,12 +23,19 @@ changed-only, origin, interval, and limit request settings. Mapping functions
 registered with `EventReceiver` execute on the receiving thread rather than on
 the SimConnect driver thread.
 
-The same target-object controls are available synchronously:
+AI-aircraft creation and target-object controls are available synchronously:
 
 ```rust
+let aircraft = sim.create_non_atc_aircraft(model_title, tail_number, initial_position)?;
+let target_id = aircraft.object_id();
+
 sim.release_ai_control(target_id)?;
 sim.set_freeze(target_id, FreezeState::ALL)?;
+sim.remove_object(target_id)?;
 ```
+
+Creation blocks until SimConnect assigns an object ID. Aircraft removal remains
+explicit; dropping `AiAircraft` does not remove the simulator object.
 
 ## Examples
 
@@ -45,6 +52,8 @@ sim.set_freeze(target_id, FreezeState::ALL)?;
 - `replay_simobject` reads timestamped poses from CSV and resamples them at a
   fixed output rate, using wrapped longitude interpolation and quaternion slerp
   for attitude.
+- `sync_spawn_aircraft` creates an AI aircraft near the user, drives its pose,
+  and removes it explicitly.
 
 The replay CSV columns and optional playback arguments match the async example:
 
@@ -56,4 +65,10 @@ Run an example on Windows with the MSFS SDK installed:
 
 ```console
 cargo run -p msfs-sync --example sync_log
+```
+
+The lifecycle example needs an installed aircraft container title:
+
+```console
+cargo run -p msfs-sync --example sync_spawn_aircraft -- "Airbus A320 Neo Asobo"
 ```

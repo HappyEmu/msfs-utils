@@ -15,9 +15,10 @@ pub use windows::{EventReceiver, ExceptionReceiver, SimConnect, Subscription};
 pub use msfs_async::{__private, __sys};
 #[cfg(windows)]
 pub use msfs_async::{
-    AsyncClientDataDefinition, AsyncDataDefinition, ClientDataArea, ClientDataDefinition,
-    DataDefinition, DataXYZ, Error, FreezeState, OverflowPolicy, Period, RecurringPeriod, Result,
-    SIMCONNECT_OBJECT_ID_USER, ServerException, SubscriptionOptions,
+    AiAircraft, AsyncClientDataDefinition, AsyncDataDefinition, ClientDataArea,
+    ClientDataDefinition, DataDefinition, DataXYZ, Error, FreezeState, InitialPosition,
+    OverflowPolicy, Period, RecurringPeriod, Result, SIMCONNECT_OBJECT_ID_USER, ServerException,
+    SubscriptionOptions,
 };
 #[cfg(windows)]
 pub use msfs_async_derive::{

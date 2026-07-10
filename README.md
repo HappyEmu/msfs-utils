@@ -6,7 +6,7 @@ SimConnect API, plus platform-independent replay utilities.
 The workspace contains:
 
 - `msfs-async`: a runtime-independent async client backed by a dedicated
-  Windows event thread;
+  Windows event thread, including typed AI-aircraft lifecycle operations;
 - `msfs-sync`: a blocking facade over the same driver;
 - `msfs-async-derive`: validated simulation-object and client-data definition
   macros;

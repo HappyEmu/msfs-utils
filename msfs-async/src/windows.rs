@@ -7,8 +7,8 @@ use crate::ids::RequestIdAllocator;
 use crate::latest::{Receiver as LatestReceiver, channel as latest_channel};
 use crate::native::NativeBackend;
 use crate::{
-    AsyncClientDataDefinition, AsyncDataDefinition, Error, FreezeState, OverflowPolicy,
-    RecurringPeriod, Result, ServerException, SubscriptionOptions,
+    AiAircraft, AsyncClientDataDefinition, AsyncDataDefinition, Error, FreezeState,
+    InitialPosition, OverflowPolicy, RecurringPeriod, Result, ServerException, SubscriptionOptions,
 };
 use futures_channel::{mpsc, oneshot};
 use futures_core::Stream;
@@ -122,6 +122,61 @@ impl AsyncSimConnect {
         let (tx, rx) = oneshot::channel();
         self.send(Command::Run(Box::new(move |driver| {
             let _ = tx.send(driver.set_data_on_sim_object::<T>(object_id, &data));
+        })))?;
+        rx.await.map_err(|_| Error::DriverStopped)?
+    }
+
+    /// Create a non-ATC AI aircraft and wait for its assigned object ID.
+    ///
+    /// `container_title` must identify an installed aircraft model. If this
+    /// future is dropped after SimConnect accepts the request, the driver waits
+    /// for the assignment and removes the newly created orphan automatically.
+    pub async fn create_non_atc_aircraft(
+        &self,
+        container_title: impl Into<String>,
+        tail_number: impl Into<String>,
+        initial_position: InitialPosition,
+    ) -> Result<AiAircraft> {
+        let container_title =
+            CString::new(container_title.into()).map_err(|_| Error::InvalidCString)?;
+        let tail_number = CString::new(tail_number.into()).map_err(|_| Error::InvalidCString)?;
+        let request_id = self.next_request_id()?;
+        let (tx, rx) = oneshot::channel();
+
+        self.send(Command::Run(Box::new(move |driver| {
+            driver.create_non_atc_aircraft(
+                request_id,
+                &container_title,
+                &tail_number,
+                initial_position,
+                tx,
+            );
+        })))?;
+
+        let mut creation = CreationGuard::new(request_id, Arc::clone(&self.inner));
+        let result = rx.await.map_err(|_| Error::DriverStopped)?;
+        match result {
+            Ok(aircraft) => {
+                self.send(Command::CompleteObjectCreation(request_id))?;
+                creation.disarm();
+                Ok(aircraft)
+            }
+            Err(error) => {
+                creation.disarm();
+                Err(error)
+            }
+        }
+    }
+
+    /// Remove an AI aircraft or other client-created simulation object.
+    ///
+    /// Successful completion means SimConnect accepted the local API call.
+    /// Delayed server-side failures arrive through [`Self::exceptions`].
+    pub async fn remove_object(&self, object_id: sys::SIMCONNECT_OBJECT_ID) -> Result<()> {
+        let request_id = self.next_request_id()?;
+        let (tx, rx) = oneshot::channel();
+        self.send(Command::Run(Box::new(move |driver| {
+            let _ = tx.send(driver.remove_object(object_id, request_id));
         })))?;
         rx.await.map_err(|_| Error::DriverStopped)?
     }
@@ -624,6 +679,34 @@ struct CancellationGuard {
     armed: bool,
 }
 
+struct CreationGuard {
+    request_id: sys::SIMCONNECT_DATA_REQUEST_ID,
+    inner: Arc<ClientInner>,
+    armed: bool,
+}
+
+impl CreationGuard {
+    fn new(request_id: sys::SIMCONNECT_DATA_REQUEST_ID, inner: Arc<ClientInner>) -> Self {
+        Self {
+            request_id,
+            inner,
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CreationGuard {
+    fn drop(&mut self) {
+        if self.armed {
+            send_command(&self.inner, Command::AbandonObjectCreation(self.request_id));
+        }
+    }
+}
+
 impl CancellationGuard {
     fn new(request_id: sys::SIMCONNECT_DATA_REQUEST_ID, inner: Arc<ClientInner>) -> Self {
         Self {
@@ -647,7 +730,11 @@ impl Drop for CancellationGuard {
 }
 
 fn send_cancel(inner: &ClientInner, request_id: sys::SIMCONNECT_DATA_REQUEST_ID) {
-    if inner.commands.send(Command::Cancel(request_id)).is_ok() {
+    send_command(inner, Command::Cancel(request_id));
+}
+
+fn send_command(inner: &ClientInner, command: Command) {
+    if inner.commands.send(command).is_ok() {
         let _ = inner.command_event.set();
     }
 }
@@ -682,6 +769,8 @@ impl Drop for ClientInner {
 enum Command {
     Run(Box<dyn FnOnce(&mut Driver<NativeBackend>) + Send + 'static>),
     Cancel(sys::SIMCONNECT_DATA_REQUEST_ID),
+    CompleteObjectCreation(sys::SIMCONNECT_DATA_REQUEST_ID),
+    AbandonObjectCreation(sys::SIMCONNECT_DATA_REQUEST_ID),
     Shutdown(Option<oneshot::Sender<()>>),
 }
 
@@ -786,6 +875,12 @@ fn drain_commands(
         match commands.try_recv() {
             Ok(Command::Run(command)) => command(driver),
             Ok(Command::Cancel(request_id)) => driver.cancel(request_id),
+            Ok(Command::CompleteObjectCreation(request_id)) => {
+                driver.complete_object_creation(request_id)
+            }
+            Ok(Command::AbandonObjectCreation(request_id)) => {
+                driver.abandon_object_creation(request_id)
+            }
             Ok(Command::Shutdown(ack)) => return DriverControl::Shutdown(ack),
             Err(std_mpsc::TryRecvError::Disconnected) => return DriverControl::Shutdown(None),
             Err(std_mpsc::TryRecvError::Empty) => return DriverControl::Continue,

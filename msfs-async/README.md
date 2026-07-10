@@ -21,18 +21,27 @@ let updates = sim
 sim.set_data_on_sim_object(SIMCONNECT_OBJECT_ID_USER, &updated).await?;
 ```
 
-For an AI object whose position or attitude the client will drive, release the
-AI controller and freeze the components that the simulator would otherwise
-overwrite:
+Create a non-ATC AI aircraft, then release the AI controller and freeze the
+components that the client will drive:
 
 ```rust
+let aircraft = sim
+    .create_non_atc_aircraft(model_title, tail_number, initial_position)
+    .await?;
+let target_id = aircraft.object_id();
+
 sim.release_ai_control(target_id).await?;
 sim.set_freeze(target_id, FreezeState::ALL).await?;
+// Repeatedly call set_data_on_sim_object while driving the aircraft.
+sim.remove_object(target_id).await?;
 ```
 
-Both calls are serialized on the SimConnect driver thread. Their futures report
-whether the local SDK call was accepted; delayed server-side failures are sent
-to `sim.exceptions()`.
+Creation resolves only after SimConnect assigns an object ID. If its future is
+cancelled during the assignment handoff, the driver removes the otherwise
+orphaned aircraft. Dropping a successfully returned `AiAircraft` does not remove
+it; lifecycle owners should call `remove_object` explicitly. The control and
+removal calls report whether the local SDK call was accepted, while delayed
+server-side failures are sent to `sim.exceptions()`.
 
 `request_once` is a future which resolves to one owned value. `subscribe`
 returns a `Stream<Item = Result<T>>`; dropping that stream sends the same
@@ -82,6 +91,8 @@ particular, use `i32` rather than Rust `bool` for simulation variables, and
 - [`replay_simobject.rs`](examples/replay_simobject.rs) reads timestamped poses
   from CSV and resamples them at a fixed output rate, using wrapped longitude
   interpolation and quaternion slerp for attitude.
+- [`spawn_aircraft.rs`](examples/spawn_aircraft.rs) creates an AI aircraft near
+  the user, drives its pose for five seconds, and removes it explicitly.
 
 The replay CSV has these columns:
 
@@ -99,6 +110,12 @@ Run one on a Windows machine with the MSFS SDK installed:
 
 ```console
 cargo run -p msfs-async --example request_once
+```
+
+The lifecycle example needs an installed aircraft container title:
+
+```console
+cargo run -p msfs-async --example spawn_aircraft -- "Airbus A320 Neo Asobo"
 ```
 
 Tokio is only used by the examples; the library itself is runtime-independent.

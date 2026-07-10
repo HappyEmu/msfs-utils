@@ -16,6 +16,8 @@ enum Call {
     ClearData(u32),
     AddClientData(u32),
     ClearClientData(u32),
+    CreateAircraft(u32),
+    RemoveObject { object_id: u32, request_id: u32 },
     Other,
 }
 
@@ -65,6 +67,7 @@ impl SimConnectBackend for FakeBackend {
     const RECV_ID_SIMOBJECT_DATA: u32 = 8;
     const RECV_ID_SIMOBJECT_DATA_BYTYPE: u32 = 9;
     const RECV_ID_CLIENT_DATA: u32 = 16;
+    const RECV_ID_ASSIGNED_OBJECT_ID: u32 = 17;
 
     fn open(_: &CStr, context: Self::OpenContext) -> Result<Self> {
         context
@@ -78,6 +81,25 @@ impl SimConnectBackend for FakeBackend {
     fn release_ai_control(&mut self, _: u32, _: u32) -> Result<()> {
         self.calls.push(Call::Other);
         self.result("release")
+    }
+
+    fn create_non_atc_aircraft(
+        &mut self,
+        _: &CStr,
+        _: &CStr,
+        _: InitialPosition,
+        request_id: u32,
+    ) -> Result<()> {
+        self.calls.push(Call::CreateAircraft(request_id));
+        self.result("create_aircraft")
+    }
+
+    fn remove_object(&mut self, object_id: u32, request_id: u32) -> Result<()> {
+        self.calls.push(Call::RemoveObject {
+            object_id,
+            request_id,
+        });
+        self.result("remove_object")
     }
 
     fn transmit_client_event(&mut self, _: u32, _: u32, _: u32) -> Result<()> {
@@ -163,6 +185,7 @@ const RECV_ID_NULL: u32 = FakeBackend::RECV_ID_NULL;
 const RECV_ID_EXCEPTION: u32 = FakeBackend::RECV_ID_EXCEPTION;
 const RECV_ID_QUIT: u32 = FakeBackend::RECV_ID_QUIT;
 const RECV_ID_SIMOBJECT_DATA: u32 = FakeBackend::RECV_ID_SIMOBJECT_DATA;
+const RECV_ID_ASSIGNED_OBJECT_ID: u32 = FakeBackend::RECV_ID_ASSIGNED_OBJECT_ID;
 
 #[test]
 fn fake_backend_scripts_connection_failure() {
@@ -236,6 +259,13 @@ fn exception_packet(code: u32, send_id: u32, index: u32) -> Vec<u8> {
     packet
 }
 
+fn assigned_object_packet(request_id: u32, object_id: u32) -> Vec<u8> {
+    let mut packet = packet(RECV_ID_ASSIGNED_OBJECT_ID, ASSIGNED_OBJECT_PACKET_SIZE);
+    write_u32(&mut packet, 12, request_id);
+    write_u32(&mut packet, 16, object_id);
+    packet
+}
+
 fn write_u32(packet: &mut [u8], offset: usize, value: u32) {
     packet[offset..offset + 4].copy_from_slice(&value.to_ne_bytes());
 }
@@ -247,6 +277,128 @@ fn register_once(
     let (tx, rx) = oneshot::channel();
     driver.request_once::<TestData>(request_id, 7, tx);
     rx
+}
+
+fn initial_position() -> InitialPosition {
+    InitialPosition {
+        latitude: 47.0,
+        longitude: 8.0,
+        altitude: 1_500.0,
+        pitch: 1.0,
+        bank: 2.0,
+        heading: 90.0,
+        on_ground: false,
+        airspeed: 120,
+    }
+}
+
+fn create_aircraft(
+    driver: &mut Driver<FakeBackend>,
+    request_id: u32,
+) -> oneshot::Receiver<Result<AiAircraft>> {
+    let (tx, rx) = oneshot::channel();
+    driver.create_non_atc_aircraft(
+        request_id,
+        &CString::new("Test Aircraft").unwrap(),
+        &CString::new("N12345").unwrap(),
+        initial_position(),
+        tx,
+    );
+    rx
+}
+
+#[test]
+fn creates_aircraft_and_delivers_assigned_object_id() {
+    let mut driver = Driver::new(FakeBackend::default());
+    let aircraft = create_aircraft(&mut driver, 40);
+    driver.backend.packet(assigned_object_packet(40, 9001));
+
+    driver.drain_dispatch().unwrap();
+    assert_eq!(
+        aircraft.now_or_never().unwrap().unwrap(),
+        Ok(AiAircraft::new(9001))
+    );
+    assert!(
+        driver
+            .backend()
+            .calls
+            .iter()
+            .any(|call| matches!(call, Call::CreateAircraft(request_id) if *request_id == 40))
+    );
+
+    let collision = create_aircraft(&mut driver, 40);
+    assert_eq!(
+        collision.now_or_never().unwrap().unwrap(),
+        Err(Error::IdExhausted)
+    );
+    driver.complete_object_creation(40);
+    let replacement = create_aircraft(&mut driver, 40);
+    assert!(replacement.now_or_never().is_none());
+}
+
+#[test]
+fn aircraft_creation_reports_immediate_and_correlated_server_errors() {
+    let mut backend = FakeBackend::default();
+    backend.fail("create_aircraft", Error::HResult(-30));
+    let mut driver = Driver::new(backend);
+    let immediate = create_aircraft(&mut driver, 41);
+    assert_eq!(
+        immediate.now_or_never().unwrap().unwrap(),
+        Err(Error::HResult(-30))
+    );
+
+    let mut backend = FakeBackend::default();
+    backend.send_ids.push_back(Ok(88));
+    let mut driver = Driver::new(backend);
+    let delayed = create_aircraft(&mut driver, 42);
+    driver.backend.packet(exception_packet(22, 88, 0));
+    driver.drain_dispatch().unwrap();
+    assert_eq!(
+        delayed.now_or_never().unwrap().unwrap(),
+        Err(Error::SimConnectException(ServerException {
+            code: 22,
+            send_id: 88,
+            index: 0,
+        }))
+    );
+}
+
+#[test]
+fn cancellation_before_assignment_removes_the_late_aircraft() {
+    let mut backend = FakeBackend::default();
+    backend.fail("remove_object", Error::HResult(-31));
+    let mut driver = Driver::new(backend);
+    let aircraft = create_aircraft(&mut driver, 43);
+    drop(aircraft);
+    driver.abandon_object_creation(43);
+    driver.backend.packet(assigned_object_packet(43, 9002));
+
+    assert!(driver.drain_dispatch().unwrap());
+    assert!(driver.backend().calls.iter().any(|call| matches!(
+        call,
+        Call::RemoveObject {
+            object_id: 9002,
+            request_id: 43,
+        }
+    )));
+}
+
+#[test]
+fn cancellation_after_assignment_was_queued_removes_the_aircraft() {
+    let mut driver = Driver::new(FakeBackend::default());
+    let aircraft = create_aircraft(&mut driver, 44);
+    driver.backend.packet(assigned_object_packet(44, 9003));
+    driver.drain_dispatch().unwrap();
+
+    drop(aircraft);
+    driver.abandon_object_creation(44);
+    assert!(driver.backend().calls.iter().any(|call| matches!(
+        call,
+        Call::RemoveObject {
+            object_id: 9003,
+            request_id: 44,
+        }
+    )));
 }
 
 #[test]
@@ -601,6 +753,24 @@ fn rejects_truncated_packets_and_inconsistent_definition_counts() {
         })
     );
     assert!(rx.now_or_never().is_none());
+
+    let mut malformed_assignment = assigned_object_packet(9, 1);
+    malformed_assignment.truncate(ASSIGNED_OBJECT_PACKET_SIZE - 1);
+    write_u32(
+        &mut malformed_assignment,
+        0,
+        (ASSIGNED_OBJECT_PACKET_SIZE - 1) as u32,
+    );
+    let mut backend = FakeBackend::default();
+    backend.packet(malformed_assignment);
+    let mut driver = Driver::new(backend);
+    assert_eq!(
+        driver.drain_dispatch(),
+        Err(Error::InvalidPacket {
+            expected: ASSIGNED_OBJECT_PACKET_SIZE,
+            actual: ASSIGNED_OBJECT_PACKET_SIZE - 1,
+        })
+    );
 }
 
 #[test]
