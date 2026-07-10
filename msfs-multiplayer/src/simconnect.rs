@@ -1,4 +1,5 @@
 use crate::DynError;
+use crate::drift::position_drift;
 use crate::live::{LatestLocalState, LatestRemoteSnapshot};
 use crate::protocol::{AircraftState, AircraftUpdate, UserId};
 use msfs_sync::{
@@ -7,6 +8,9 @@ use msfs_sync::{
 };
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
+use std::time::Instant;
+
+const DRIFT_LOG_INTERVAL: Duration = Duration::from_secs(1);
 
 #[data_definition]
 #[derive(Debug)]
@@ -91,6 +95,26 @@ struct RemoteAircraftData {
     velocity_body_z: f64,
 }
 
+#[data_definition]
+#[derive(Debug)]
+struct RemoteAircraftPosition {
+    #[name = "PLANE LATITUDE"]
+    #[unit = "Degrees"]
+    latitude: f64,
+    #[name = "PLANE LONGITUDE"]
+    #[unit = "Degrees"]
+    longitude: f64,
+    #[name = "PLANE ALTITUDE"]
+    #[unit = "Feet"]
+    altitude: f64,
+}
+
+struct RemoteAircraft {
+    handle: AiAircraft,
+    expected: AircraftState,
+    next_drift_log: Instant,
+}
+
 pub fn run(
     model_title: &str,
     local_state: LatestLocalState,
@@ -102,7 +126,7 @@ pub fn run(
         SubscriptionOptions::new(RecurringPeriod::SimFrame).latest(),
     )?;
     let mut exceptions = sim.exceptions()?;
-    let mut aircraft = HashMap::<UserId, AiAircraft>::new();
+    let mut aircraft = HashMap::<UserId, RemoteAircraft>::new();
 
     loop {
         while let Some(update) = user_updates.try_recv()? {
@@ -130,7 +154,7 @@ pub fn run(
 fn reconcile(
     sim: &SimConnect,
     model_title: &str,
-    aircraft: &mut HashMap<UserId, AiAircraft>,
+    aircraft: &mut HashMap<UserId, RemoteAircraft>,
     snapshot: &[AircraftUpdate],
 ) -> Result<(), DynError> {
     let present = snapshot
@@ -154,11 +178,23 @@ fn reconcile(
                 update.user_id,
                 created.object_id()
             );
-            aircraft.insert(update.user_id, created);
+            aircraft.insert(
+                update.user_id,
+                RemoteAircraft {
+                    handle: created,
+                    expected: update.state,
+                    next_drift_log: Instant::now() + DRIFT_LOG_INTERVAL,
+                },
+            );
         }
 
-        let object_id = aircraft[&update.user_id].object_id();
+        let remote = aircraft
+            .get_mut(&update.user_id)
+            .expect("the remote aircraft was just created or already existed");
+        remote.expected = update.state;
+        let object_id = remote.handle.object_id();
         sim.set_data_on_sim_object(object_id, &RemoteAircraftData::from(update.state))?;
+        log_drift_if_due(sim, update.user_id, remote);
     }
 
     let removed = aircraft
@@ -170,10 +206,39 @@ fn reconcile(
         let object = aircraft
             .remove(&user_id)
             .expect("the object ID came from this map");
-        sim.remove_object(object.object_id())?;
+        sim.remove_object(object.handle.object_id())?;
         eprintln!("Removed remote user {user_id}.");
     }
     Ok(())
+}
+
+fn log_drift_if_due(sim: &SimConnect, user_id: UserId, remote: &mut RemoteAircraft) {
+    let now = Instant::now();
+    if now < remote.next_drift_log {
+        return;
+    }
+    remote.next_drift_log = now + DRIFT_LOG_INTERVAL;
+
+    match sim.request_once::<RemoteAircraftPosition>(remote.handle.object_id()) {
+        Ok(actual) => {
+            let expected = remote.expected;
+            let drift = position_drift(
+                expected.latitude,
+                expected.longitude,
+                expected.altitude,
+                actual.latitude,
+                actual.longitude,
+                actual.altitude,
+            );
+            eprintln!(
+                "Remote user {user_id} drift: horizontal={:.1} ft vertical={:+.1} ft total={:.1} ft",
+                drift.horizontal_feet, drift.vertical_feet, drift.total_feet,
+            );
+        }
+        Err(error) => {
+            eprintln!("Could not measure remote user {user_id} drift: {error}");
+        }
+    }
 }
 
 fn initial_position(state: AircraftState) -> InitialPosition {

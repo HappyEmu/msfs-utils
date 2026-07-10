@@ -1,3 +1,5 @@
+#[cfg(any(windows, test))]
+mod drift;
 #[cfg(windows)]
 mod live;
 mod network;
