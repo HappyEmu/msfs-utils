@@ -44,7 +44,7 @@ impl SimConnectBackend for NativeBackend {
                 std::ptr::null_mut(),
                 0,
                 event as _,
-                0,
+                sys::SIMCONNECT_OPEN_CONFIGINDEX_LOCAL,
             )
         })?;
         Ok(Self { handle })

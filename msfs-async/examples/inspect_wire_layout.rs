@@ -19,7 +19,7 @@ mod windows {
                 std::mem::zeroed(),
                 0,
                 std::mem::zeroed(),
-                0,
+                sys::SIMCONNECT_OPEN_CONFIGINDEX_LOCAL,
             )
         })?;
         let connection = Connection(handle);
