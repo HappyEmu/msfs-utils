@@ -4,7 +4,7 @@ use crate::backend::{
 use crate::{Error, InitialPosition, Result};
 use msfs::sys;
 use std::ffi::CStr;
-use windows_sys::Win32::Foundation::HANDLE;
+use windows_sys::Win32::Foundation::{E_FAIL, HANDLE};
 
 pub(crate) struct NativeBackend {
     handle: sys::HANDLE,
@@ -239,10 +239,8 @@ impl SimConnectBackend for NativeBackend {
     fn next_dispatch(&mut self, packet: &mut Vec<u8>) -> Result<bool> {
         let mut recv = std::ptr::null_mut();
         let mut size = 0;
-        check_hresult(unsafe {
-            sys::SimConnect_GetNextDispatch(self.handle, &mut recv, &mut size)
-        })?;
-        if recv.is_null() {
+        let result = unsafe { sys::SimConnect_GetNextDispatch(self.handle, &mut recv, &mut size) };
+        if !dispatch_result_has_packet(result, recv, size)? {
             return Ok(false);
         }
         // SAFETY: a successful GetNextDispatch exposes `size` readable bytes
@@ -254,6 +252,18 @@ impl SimConnectBackend for NativeBackend {
         });
         Ok(true)
     }
+}
+
+fn dispatch_result_has_packet(
+    result: sys::HRESULT,
+    recv: *mut sys::SIMCONNECT_RECV,
+    size: u32,
+) -> Result<bool> {
+    if result == E_FAIL && recv.is_null() && size == 0 {
+        return Ok(false);
+    }
+    check_hresult(result)?;
+    Ok(!recv.is_null())
 }
 
 impl Drop for NativeBackend {
@@ -288,5 +298,31 @@ fn check_hresult(result: sys::HRESULT) -> Result<()> {
         Ok(())
     } else {
         Err(Error::HResult(result as i32))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_dispatch_e_fail_is_not_a_session_failure() {
+        assert_eq!(
+            dispatch_result_has_packet(E_FAIL, std::ptr::null_mut(), 0),
+            Ok(false)
+        );
+    }
+
+    #[test]
+    fn dispatch_failures_with_inconsistent_output_remain_errors() {
+        let packet = std::ptr::NonNull::<sys::SIMCONNECT_RECV>::dangling().as_ptr();
+        assert_eq!(
+            dispatch_result_has_packet(E_FAIL, packet, 0),
+            Err(Error::HResult(E_FAIL))
+        );
+        assert_eq!(
+            dispatch_result_has_packet(E_FAIL, std::ptr::null_mut(), 12),
+            Err(Error::HResult(E_FAIL))
+        );
     }
 }

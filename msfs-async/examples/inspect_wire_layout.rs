@@ -58,19 +58,30 @@ mod windows {
         })?;
 
         let deadline = Instant::now() + Duration::from_secs(10);
+        let mut empty_e_fail_polls = 0_u32;
         while Instant::now() < deadline {
             let mut receive = std::ptr::null_mut();
             let mut received_size = 0;
             let result = unsafe {
                 sys::SimConnect_GetNextDispatch(handle, &mut receive, &mut received_size)
             };
-            if result >= 0 && !receive.is_null() {
+            if result == windows_sys::Win32::Foundation::E_FAIL
+                && receive.is_null()
+                && received_size == 0
+            {
+                empty_e_fail_polls += 1;
+                std::thread::sleep(Duration::from_millis(10));
+                continue;
+            }
+            check("SimConnect_GetNextDispatch", result)?;
+            if !receive.is_null() {
                 // SAFETY: SimConnect returned `received_size` readable bytes
                 // which remain valid until the next dispatch API call.
                 let packet = unsafe {
                     std::slice::from_raw_parts(receive.cast::<u8>(), received_size as usize)
                 };
                 if inspect_packet(packet)? {
+                    println!("empty E_FAIL dispatch polls: {empty_e_fail_polls}");
                     drop(connection);
                     return Ok(());
                 }
