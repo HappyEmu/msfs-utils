@@ -1,0 +1,8 @@
+[package]
+name = "msfs-replay"
+version = "0.1.0"
+edition = "2024"
+description = "Timestamped flight-pose recordings and interpolation for SimConnect examples"
+license = "MIT"
+
+[dependencies]

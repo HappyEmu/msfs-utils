@@ -1,0 +1,24 @@
+[package]
+name = "msfs-async"
+version = "0.1.0"
+edition = "2024"
+description = "Runtime-independent async SimConnect client built on msfs-rs"
+license = "MIT"
+
+[dependencies]
+futures-channel = "0.3"
+futures-core = "0.3"
+msfs-async-derive = { path = "../msfs-async-derive", version = "0.1.0" }
+
+[target.'cfg(windows)'.dependencies]
+msfs = { path = "../checkouts/msfs-rs/msfs", version = "0.2.0" }
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+] }
+
+[dev-dependencies]
+futures-util = "0.3"
+msfs-replay = { path = "../msfs-replay", version = "0.1.0" }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }

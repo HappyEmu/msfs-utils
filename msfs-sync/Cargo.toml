@@ -1,0 +1,48 @@
+[package]
+name = "msfs-sync"
+version = "0.1.0"
+edition = "2024"
+description = "Blocking SimConnect client built on the msfs-async driver"
+license = "MIT"
+autoexamples = false
+
+[[example]]
+name = "sync_request_once"
+path = "examples/request_once.rs"
+
+[[example]]
+name = "sync_log"
+path = "examples/log.rs"
+
+[[example]]
+name = "sync_client_data"
+path = "examples/client_data.rs"
+
+[[example]]
+name = "sync_read_write_same_client"
+path = "examples/read_write_same_client.rs"
+
+[[example]]
+name = "sync_multiplexed"
+path = "examples/multiplexed.rs"
+
+[[example]]
+name = "sync_multiple_receivers"
+path = "examples/multiple_receivers.rs"
+
+[[example]]
+name = "sync_relay_simobject"
+path = "examples/relay_simobject.rs"
+
+[[example]]
+name = "sync_replay_simobject"
+path = "examples/replay_simobject.rs"
+
+[dev-dependencies]
+msfs-replay = { path = "../msfs-replay", version = "0.1.0" }
+
+[target.'cfg(windows)'.dependencies]
+futures-executor = "0.3"
+futures-util = "0.3"
+msfs-async = { path = "../msfs-async", version = "0.1.0" }
+msfs-async-derive = { path = "../msfs-async-derive", version = "0.1.0" }
