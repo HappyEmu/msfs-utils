@@ -67,8 +67,33 @@ native driver thread.
 The `#[data_definition]` and `#[client_data_definition]` macros generate the C
 layout, `Copy` implementation, SDK definition trait, and internal safety marker.
 They reject fields which cannot safely be populated from SimConnect bytes. In
-particular, use `i32` rather than Rust `bool` for simulation variables, and
-`u8` or `i32` rather than `bool` for externally writable client data.
+particular, use an explicitly requested integer representation such as `i32` or
+`i64` rather than Rust `bool` for simulation variables, and `u8` or `i32`
+rather than `bool` for externally writable client data.
+
+## Wire-layout verification
+
+Microsoft's published documentation and the distributed `SimConnect.h` disagree
+about `SIMCONNECT_RECV_SIMOBJECT_DATA::dwDefineCount`. The web documentation
+describes it as the number of 8-byte elements in `dwData`, while the header calls
+it the number of datums and explicitly says it is not a byte count. The driver
+therefore does not derive payload length from `dwDefineCount`: the packet's
+`dwSize` bounds all reads, and the registered Rust type validates the exact
+number of payload bytes it decodes.
+
+The portable driver suite exercises both interpretations against the same mixed
+16-byte payload. To determine what a particular SDK/runtime actually emits,
+start MSFS on Windows and run:
+
+```console
+cargo run -p msfs-async --example inspect_wire_layout
+```
+
+The probe requests `INT32`, `FLOAT64`, and `INT32` in that order. It prints
+`dwSize`, `dwDefineCount`, payload length, raw bytes, packed-offset values, and
+C-aligned-offset values. Preserve that output with the SDK and simulator version
+when resolving the documentation discrepancy. This live probe remains the merge
+gate for confirming scalar packing on the real SimConnect wire.
 
 ## Examples
 
@@ -93,6 +118,8 @@ particular, use `i32` rather than Rust `bool` for simulation variables, and
   interpolation and quaternion slerp for attitude.
 - [`spawn_aircraft.rs`](examples/spawn_aircraft.rs) creates an AI aircraft near
   the user, drives its pose for five seconds, and removes it explicitly.
+- [`inspect_wire_layout.rs`](examples/inspect_wire_layout.rs) reports the raw
+  mixed-datatype receive layout and `dwDefineCount` semantics of a running SDK.
 
 The replay CSV has these columns:
 

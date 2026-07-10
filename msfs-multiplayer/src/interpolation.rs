@@ -4,16 +4,19 @@ use std::collections::VecDeque;
 use std::time::Duration;
 
 const DEFAULT_MAX_SAMPLES: usize = 256;
+const CLOCK_OFFSET_WINDOW_SECONDS: f64 = 10.0;
 
 /// A timestamped jitter buffer for one remote aircraft.
 ///
 /// Sender timestamps are mapped onto the receiver's monotonic clock using the
-/// smallest observed arrival offset. Sampling runs behind that estimated clock
-/// by the configured delay, leaving time for jittered packets to arrive.
+/// smallest arrival offset in a recent window. Sampling runs behind that
+/// estimated clock by the configured delay, leaving time for jittered packets
+/// to arrive without locking the clock estimate to a session-old minimum.
 pub struct InterpolationBuffer {
     delay_seconds: f64,
     max_samples: usize,
     clock_offset_seconds: Option<f64>,
+    clock_offsets: VecDeque<(f64, f64)>,
     last_sequence: Option<u64>,
     samples: VecDeque<AircraftUpdate>,
 }
@@ -25,6 +28,7 @@ impl InterpolationBuffer {
             delay_seconds: delay.as_secs_f64(),
             max_samples: DEFAULT_MAX_SAMPLES,
             clock_offset_seconds: None,
+            clock_offsets: VecDeque::new(),
             last_sequence: None,
             samples: VecDeque::new(),
         }
@@ -48,11 +52,22 @@ impl InterpolationBuffer {
             return false;
         }
 
-        let offset = arrived_at.as_secs_f64() - update.timestamp_seconds;
-        self.clock_offset_seconds = Some(
-            self.clock_offset_seconds
-                .map_or(offset, |current| current.min(offset)),
-        );
+        let arrival_seconds = arrived_at.as_secs_f64();
+        let offset = arrival_seconds - update.timestamp_seconds;
+        self.clock_offsets.push_back((arrival_seconds, offset));
+        let window_start = arrival_seconds - CLOCK_OFFSET_WINDOW_SECONDS;
+        while self
+            .clock_offsets
+            .front()
+            .is_some_and(|(arrival, _)| *arrival < window_start)
+        {
+            self.clock_offsets.pop_front();
+        }
+        self.clock_offset_seconds = self
+            .clock_offsets
+            .iter()
+            .map(|(_, offset)| *offset)
+            .reduce(f64::min);
         self.last_sequence = Some(update.sequence);
         self.samples.push_back(update);
         while self.samples.len() > self.max_samples {
@@ -196,5 +211,29 @@ mod tests {
         let state = buffer.sample(Duration::from_secs(10)).unwrap();
         assert_eq!(state.latitude, 12.0);
         assert_eq!(buffer.len(), 2);
+    }
+
+    #[test]
+    fn clock_offset_forgets_a_session_old_minimum() {
+        let mut buffer = InterpolationBuffer::new(Duration::from_millis(100));
+        assert!(buffer.push(update(1, 0.0, 0.0, 0.0), Duration::from_millis(50)));
+        assert!(
+            (buffer
+                .playback_timestamp(Duration::from_millis(200))
+                .unwrap()
+                - 0.05)
+                .abs()
+                < 1e-9
+        );
+
+        assert!(buffer.push(update(2, 20.0, 1.0, 0.0), Duration::from_millis(20_100)));
+        assert!(
+            (buffer
+                .playback_timestamp(Duration::from_millis(20_200))
+                .unwrap()
+                - 20.0)
+                .abs()
+                < 1e-9
+        );
     }
 }

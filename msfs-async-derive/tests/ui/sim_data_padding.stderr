@@ -1,0 +1,5 @@
+error[E0080]: evaluation panicked: simulation-object field offset does not match the packed SimConnect wire layout
+  --> tests/ui/sim_data_padding.rs:29:1
+   |
+29 | #[data_definition]
+   | ^^^^^^^^^^^^^^^^^^ evaluation of `_` failed here

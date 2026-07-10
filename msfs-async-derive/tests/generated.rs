@@ -42,6 +42,8 @@ pub mod __private {
     use std::marker::PhantomData;
 
     pub trait SimConnectDatum {}
+    impl SimConnectDatum for i32 {}
+    impl SimConnectDatum for i64 {}
     impl SimConnectDatum for f64 {}
 
     pub trait ClientDataDatum {}
@@ -59,6 +61,28 @@ struct AircraftData {
     #[unit = "Feet"]
     #[epsilon = 1]
     height: f64,
+}
+
+#[data_definition]
+#[derive(Debug)]
+struct MixedAircraftData {
+    #[name = "ENGINE TYPE"]
+    #[unit = "enum"]
+    engine_type: i32,
+    #[name = "SIM ON GROUND"]
+    #[unit = "Bool"]
+    on_ground: i32,
+    #[name = "RADIO HEIGHT"]
+    #[unit = "Feet"]
+    height: f64,
+}
+
+#[data_definition]
+#[derive(Debug)]
+struct OnGroundData {
+    #[name = "SIM ON GROUND"]
+    #[unit = "Bool"]
+    on_ground: i64,
 }
 
 #[client_data_definition]
@@ -95,6 +119,8 @@ fn assert_client_data<T: AsyncClientDataDefinition>() {}
 #[test]
 fn generated_types_implement_the_safe_api_contracts() {
     assert_aircraft_data::<AircraftData>();
+    assert_aircraft_data::<MixedAircraftData>();
+    assert_aircraft_data::<OnGroundData>();
     assert_client_data::<ClientData>();
     assert_client_data::<PaddedClientData>();
     assert_aircraft_data::<SyncAircraftData>();
@@ -104,6 +130,12 @@ fn generated_types_implement_the_safe_api_contracts() {
     let copied = value;
     assert_eq!(copied.height, 42.0);
     assert_eq!(AircraftData::DEFINITIONS.len(), 1);
+    assert_eq!(MixedAircraftData::DEFINITIONS.len(), 3);
+    assert_eq!(std::mem::size_of::<MixedAircraftData>(), 16);
+    assert_eq!(
+        OnGroundData::DEFINITIONS[0].3,
+        __sys::SIMCONNECT_DATATYPE_SIMCONNECT_DATATYPE_INT64
+    );
 
     let definitions = ClientData::get_definitions();
     assert_eq!(definitions.len(), 2);

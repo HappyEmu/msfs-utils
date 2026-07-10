@@ -56,8 +56,9 @@ fn expand_data_definition(
     let struct_name = input.ident.clone();
     let mut definitions = Vec::new();
     let mut assertions = Vec::new();
+    let mut field_types = Vec::new();
 
-    for field in &mut input.fields {
+    for (index, field) in input.fields.iter_mut().enumerate() {
         let ty = field.ty.clone();
         let datatype = simconnect_datatype(&ty)?;
         let metadata = take_data_metadata(&mut field.attrs)?;
@@ -83,12 +84,25 @@ fn expand_data_definition(
         definitions.push(quote! {
             (#name, #unit, (#epsilon) as f32, #root::__sys::#datatype)
         });
+        let member = field
+            .ident
+            .clone()
+            .map(Member::Named)
+            .unwrap_or_else(|| Member::Unnamed(index.into()));
+        let expected_offset = quote!(0usize #(+ ::core::mem::size_of::<#field_types>())*);
         assertions.push(quote! {
             let _: ::core::marker::PhantomData<
                 #root::__private::AssertSimConnectDatum<#ty>
             > = ::core::marker::PhantomData;
+            assert!(
+                ::core::mem::offset_of!(#struct_name, #member) == #expected_offset,
+                "simulation-object field offset does not match the packed SimConnect wire layout",
+            );
         });
+        field_types.push(ty);
     }
+
+    let wire_size = quote!(0usize #(+ ::core::mem::size_of::<#field_types>())*);
 
     let repr = add_repr.then(|| quote!(#[repr(C)]));
     Ok(quote! {
@@ -109,6 +123,10 @@ fn expand_data_definition(
 
         const _: () = {
             #(#assertions)*
+            assert!(
+                ::core::mem::size_of::<#struct_name>() == #wire_size,
+                "simulation-object type size does not match the packed SimConnect wire layout",
+            );
         };
     })
 }

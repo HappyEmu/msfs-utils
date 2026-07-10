@@ -43,6 +43,9 @@ The relay uses versioned UDP datagrams, rejects stale per-user updates, excludes
 the receiving user from snapshots, and expires silent clients after ten
 seconds. The live client shares only the newest local state and remote snapshot,
 so slow SimConnect operations do not build an unbounded queue of stale poses.
+The relay currently encodes one complete snapshot per recipient every 33 ms,
+making its snapshot work quadratic in the number of connected users; it is
+intended for small prototype sessions, not large deployments.
 
 This remains a prototype. It has no authentication, congestion control, model
 matching, clock synchronization, or interpolation buffer. Every remote user is

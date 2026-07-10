@@ -62,7 +62,7 @@ impl SimConnectBackend for NativeBackend {
                 object_id,
                 0,
                 0,
-                data.len().try_into().map_err(|_| Error::IdExhausted)?,
+                data.len().try_into().map_err(|_| Error::InvalidDataSize)?,
                 data.as_ptr().cast_mut().cast(),
             )
         })
@@ -204,7 +204,7 @@ impl SimConnectBackend for NativeBackend {
                 define_id,
                 0,
                 0,
-                data.len().try_into().map_err(|_| Error::IdExhausted)?,
+                data.len().try_into().map_err(|_| Error::InvalidDataSize)?,
                 data.as_ptr().cast_mut().cast(),
             )
         })

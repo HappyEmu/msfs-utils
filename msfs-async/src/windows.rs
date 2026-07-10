@@ -1,7 +1,7 @@
 use crate::backend::{DataPeriod, SimConnectBackend};
 use crate::driver::{
-    ClientData, DataDefinitionEntry, DeliverySender, Driver, MappedTarget, MappedThunk,
-    RequestSettings, SimData,
+    ClientData, DataDefinitionEntry, DeliverySender, Driver, MappedError, MappedTarget,
+    MappedThunk, RequestSettings, SimData,
 };
 use crate::ids::RequestIdAllocator;
 use crate::latest::{Receiver as LatestReceiver, channel as latest_channel};
@@ -80,6 +80,9 @@ impl AsyncSimConnect {
     }
 
     /// Close the shared native connection and wait for the driver to exit.
+    ///
+    /// This stops the session for every clone of this handle; subsequent
+    /// operations on those clones return [`Error::DriverStopped`].
     pub async fn close(self) -> Result<()> {
         let (tx, rx) = oneshot::channel();
         self.send(Command::Shutdown(Some(tx)))?;
@@ -507,7 +510,8 @@ where
 /// A heterogeneous stream assembled from several typed SimConnect subscriptions.
 ///
 /// Mapping functions execute when this stream is polled, never on the native
-/// driver thread.
+/// driver thread. A route-specific failure is yielded as an error item without
+/// terminating the other subscriptions in the stream.
 pub struct EventStream<E> {
     subscriptions: Vec<MappedSubscription>,
     client: AsyncSimConnect,
@@ -574,7 +578,7 @@ pub fn mapped_event_channel<E>(capacity: usize) -> (MappedEventSender<E>, Mapped
 #[doc(hidden)]
 pub struct MappedEventSender<E> {
     items: mpsc::Sender<MappedThunk<E>>,
-    errors: mpsc::UnboundedSender<Error>,
+    errors: mpsc::UnboundedSender<MappedError>,
 }
 
 impl<E> Clone for MappedEventSender<E> {
@@ -590,7 +594,7 @@ impl<E> Clone for MappedEventSender<E> {
 #[doc(hidden)]
 pub struct MappedEventStream<E> {
     items: mpsc::Receiver<MappedThunk<E>>,
-    errors: mpsc::UnboundedReceiver<Error>,
+    errors: mpsc::UnboundedReceiver<MappedError>,
     terminated: bool,
 }
 
@@ -605,8 +609,13 @@ impl<E> Stream for MappedEventStream<E> {
             return Poll::Ready(None);
         }
         if let Poll::Ready(Some(error)) = Pin::new(&mut this.errors).poll_next(cx) {
-            this.terminated = true;
-            return Poll::Ready(Some(Err(error)));
+            return match error {
+                MappedError::Route(error) => Poll::Ready(Some(Err(error))),
+                MappedError::Session(error) => {
+                    this.terminated = true;
+                    Poll::Ready(Some(Err(error)))
+                }
+            };
         }
         Pin::new(&mut this.items)
             .poll_next(cx)
@@ -641,6 +650,9 @@ impl Stream for ExceptionStream {
 }
 
 /// A typed recurring SimConnect request.
+///
+/// If the route fails, values already in its data buffer are yielded before
+/// the terminal error.
 pub struct Subscription<T> {
     request_id: sys::SIMCONNECT_DATA_REQUEST_ID,
     items: SubscriptionItems<T>,
@@ -659,11 +671,30 @@ impl<T> Stream for Subscription<T> {
         if this.terminated {
             return Poll::Ready(None);
         }
-        if let Poll::Ready(Some(error)) = Pin::new(&mut this.errors).poll_next(cx) {
-            this.terminated = true;
-            return Poll::Ready(Some(Err(error)));
+        match this.items.poll_next(cx) {
+            Poll::Ready(Some(item)) => return Poll::Ready(Some(Ok(item))),
+            Poll::Ready(None) => {}
+            Poll::Pending => {
+                return match Pin::new(&mut this.errors).poll_next(cx) {
+                    Poll::Ready(Some(error)) => {
+                        this.terminated = true;
+                        Poll::Ready(Some(Err(error)))
+                    }
+                    Poll::Ready(None) | Poll::Pending => Poll::Pending,
+                };
+            }
         }
-        this.items.poll_next(cx).map(|item| item.map(Ok))
+        match Pin::new(&mut this.errors).poll_next(cx) {
+            Poll::Ready(Some(error)) => {
+                this.terminated = true;
+                Poll::Ready(Some(Err(error)))
+            }
+            Poll::Ready(None) => {
+                this.terminated = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => Poll::Pending,
+        }
     }
 }
 
@@ -842,21 +873,22 @@ fn run_driver(
     let mut shutdown_ack = None;
     let outcome = loop {
         let wait = unsafe { WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE) };
-        match wait {
+        let control = match wait {
             WAIT_OBJECT_0 => match driver.drain_dispatch() {
-                Ok(true) => {}
+                Ok(true) => drain_commands(&mut driver, &commands),
                 Ok(false) => break Err(Error::DriverStopped),
                 Err(error) => break Err(error),
             },
-            value if value == WAIT_OBJECT_0 + 1 => match drain_commands(&mut driver, &commands) {
-                DriverControl::Continue => {}
-                DriverControl::Shutdown(ack) => {
-                    shutdown_ack = ack;
-                    break Ok(());
-                }
-            },
+            value if value == WAIT_OBJECT_0 + 1 => drain_commands(&mut driver, &commands),
             WAIT_FAILED => break Err(last_windows_error()),
             _ => break Err(last_windows_error()),
+        };
+        match control {
+            DriverControl::Continue => {}
+            DriverControl::Shutdown(ack) => {
+                shutdown_ack = ack;
+                break Ok(());
+            }
         }
     };
 

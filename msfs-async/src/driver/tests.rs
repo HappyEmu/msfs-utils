@@ -6,7 +6,7 @@ use futures_util::{FutureExt, StreamExt};
 use std::collections::{HashMap, VecDeque};
 use std::ffi::CStr;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 #[derive(Clone, Debug)]
 enum Call {
@@ -211,6 +211,24 @@ struct TwoData {
     second: u32,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[repr(C)]
+struct DefineCountProbe {
+    first: i32,
+    second: i32,
+    altitude: f64,
+}
+
+impl SimData for DefineCountProbe {
+    fn definitions() -> Result<Vec<DataDefinitionEntry>> {
+        Ok(vec![
+            definition("FIRST"),
+            definition("SECOND"),
+            definition("ALTITUDE"),
+        ])
+    }
+}
+
 impl SimData for TwoData {
     fn definitions() -> Result<Vec<DataDefinitionEntry>> {
         Ok(vec![definition("FIRST"), definition("SECOND")])
@@ -220,6 +238,18 @@ impl SimData for TwoData {
 impl ClientData for TwoData {
     fn definitions() -> Vec<client_layout::FieldDefinition> {
         vec![(0, 4, 4, 0.0), (4, 4, 4, 0.0)]
+    }
+}
+
+static CLIENT_DEFINITION_CALLS: AtomicUsize = AtomicUsize::new(0);
+
+#[derive(Clone, Copy)]
+struct CountingClientData(u32);
+
+impl ClientData for CountingClientData {
+    fn definitions() -> Vec<client_layout::FieldDefinition> {
+        CLIENT_DEFINITION_CALLS.fetch_add(1, Ordering::SeqCst);
+        vec![(0, 4, 4, 0.0)]
     }
 }
 
@@ -248,6 +278,30 @@ fn data_packet(request_id: u32, define_id: u32, define_count: u32, value: u32) -
     write_u32(&mut packet, 20, define_id);
     write_u32(&mut packet, 36, define_count);
     write_u32(&mut packet, DATA_PAYLOAD_OFFSET, value);
+    packet
+}
+
+fn define_count_packet(request_id: u32, define_count: u32) -> Vec<u8> {
+    let value = DefineCountProbe {
+        first: 2,
+        second: 3,
+        altitude: 1_500.0,
+    };
+    let mut packet = packet(
+        RECV_ID_SIMOBJECT_DATA,
+        DATA_PAYLOAD_OFFSET + std::mem::size_of::<DefineCountProbe>(),
+    );
+    write_u32(&mut packet, 12, request_id);
+    write_u32(&mut packet, 20, 0);
+    write_u32(&mut packet, 36, define_count);
+    write_u32(&mut packet, DATA_PAYLOAD_OFFSET, value.first as u32);
+    write_u32(
+        &mut packet,
+        DATA_PAYLOAD_OFFSET + std::mem::size_of::<i32>(),
+        value.second as u32,
+    );
+    packet[DATA_PAYLOAD_OFFSET + 8..DATA_PAYLOAD_OFFSET + 16]
+        .copy_from_slice(&value.altitude.to_ne_bytes());
     packet
 }
 
@@ -415,6 +469,46 @@ fn registers_delivers_and_removes_a_one_shot_request() {
 }
 
 #[test]
+fn definition_count_is_not_treated_as_payload_byte_size() {
+    let mut driver = Driver::new(FakeBackend::default());
+    let rx = register_once(&mut driver, 15);
+    let mut compact = data_packet(15, 0, 1, 42);
+    compact.truncate(DATA_PAYLOAD_OFFSET + std::mem::size_of::<TestData>());
+    let compact_size = compact.len() as u32;
+    write_u32(&mut compact, 0, compact_size);
+    driver.backend.packet(compact);
+
+    assert!(driver.drain_dispatch().unwrap());
+    assert_eq!(rx.now_or_never().unwrap().unwrap(), Ok(TestData(42)));
+}
+
+#[test]
+fn accepts_datum_count_and_eight_byte_element_count_interpretations() {
+    let mut driver = Driver::new(FakeBackend::default());
+    let mut receivers = Vec::new();
+    for (request_id, define_count) in [(16, 3), (17, 2)] {
+        let (tx, rx) = oneshot::channel();
+        driver.request_once::<DefineCountProbe>(request_id, 0, tx);
+        driver
+            .backend
+            .packet(define_count_packet(request_id, define_count));
+        receivers.push(rx);
+    }
+
+    assert!(driver.drain_dispatch().unwrap());
+    for receiver in receivers {
+        assert_eq!(
+            receiver.now_or_never().unwrap().unwrap(),
+            Ok(DefineCountProbe {
+                first: 2,
+                second: 3,
+                altitude: 1_500.0,
+            })
+        );
+    }
+}
+
+#[test]
 fn rolls_back_partial_data_definitions_and_reports_rollback_failure() {
     let mut backend = FakeBackend::default();
     backend.succeed("add_data");
@@ -473,6 +567,17 @@ fn rolls_back_partial_client_definitions() {
             .iter()
             .any(|call| matches!(call, Call::ClearClientData(0)))
     );
+}
+
+#[test]
+fn cached_client_definitions_skip_layout_planning() {
+    CLIENT_DEFINITION_CALLS.store(0, Ordering::SeqCst);
+    let mut driver = Driver::new(FakeBackend::default());
+
+    driver.set_client_data(3, &CountingClientData(1)).unwrap();
+    driver.set_client_data(3, &CountingClientData(2)).unwrap();
+
+    assert_eq!(CLIENT_DEFINITION_CALLS.load(Ordering::SeqCst), 1);
 }
 
 #[test]
@@ -643,6 +748,34 @@ fn terminal_error_is_delivered_while_the_data_buffer_is_full() {
 }
 
 #[test]
+fn limited_subscription_completes_when_the_final_value_is_dropped() {
+    let mut driver = Driver::new(FakeBackend::default());
+    let (items_tx, mut items_rx) = mpsc::channel(0);
+    let (errors_tx, _errors_rx) = mpsc::unbounded();
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let mut settings = RequestSettings::recurring(DataPeriod::SimFrame);
+    settings.limit = 2;
+    driver.subscribe::<TestData>(
+        10,
+        2,
+        settings,
+        DeliverySender::Buffered(items_tx),
+        errors_tx,
+        ready_tx,
+    );
+    assert_eq!(ready_rx.now_or_never().unwrap().unwrap(), Ok(()));
+    driver.backend.packet(data_packet(10, 0, 1, 1));
+    driver.backend.packet(data_packet(10, 0, 1, 2));
+
+    driver.drain_dispatch().unwrap();
+
+    assert_eq!(items_rx.next().now_or_never().unwrap(), Some(TestData(1)));
+    assert_eq!(items_rx.next().now_or_never().unwrap(), None);
+    let replacement = register_once(&mut driver, 10);
+    assert!(replacement.now_or_never().is_none());
+}
+
+#[test]
 fn explicit_termination_fails_pending_routes() {
     let mut driver = Driver::new(FakeBackend::default());
     let pending = register_once(&mut driver, 21);
@@ -728,7 +861,7 @@ fn correlates_server_exceptions_with_the_last_send_id() {
 }
 
 #[test]
-fn rejects_truncated_packets_and_inconsistent_definition_counts() {
+fn rejects_truncated_headers_and_routes_truncated_payload_errors() {
     let mut backend = FakeBackend::default();
     backend.packet(vec![0; 8]);
     let mut driver = Driver::new(backend);
@@ -743,16 +876,17 @@ fn rejects_truncated_packets_and_inconsistent_definition_counts() {
     let mut driver = Driver::new(FakeBackend::default());
     let rx = register_once(&mut driver, 8);
     let mut malformed = data_packet(8, 0, 1, 1);
-    write_u32(&mut malformed, 36, 2);
+    malformed.truncate(DATA_PAYLOAD_OFFSET + 3);
+    write_u32(&mut malformed, 0, (DATA_PAYLOAD_OFFSET + 3) as u32);
     driver.backend.packet(malformed);
+    assert!(driver.drain_dispatch().unwrap());
     assert_eq!(
-        driver.drain_dispatch(),
+        rx.now_or_never().unwrap().unwrap(),
         Err(Error::InvalidPacket {
-            expected: DATA_PAYLOAD_OFFSET + 16,
-            actual: DATA_PAYLOAD_OFFSET + 8,
+            expected: DATA_PAYLOAD_OFFSET + std::mem::size_of::<TestData>(),
+            actual: DATA_PAYLOAD_OFFSET + 3,
         })
     );
-    assert!(rx.now_or_never().is_none());
 
     let mut malformed_assignment = assigned_object_packet(9, 1);
     malformed_assignment.truncate(ASSIGNED_OBJECT_PACKET_SIZE - 1);
@@ -815,4 +949,41 @@ fn mapped_functions_execute_only_when_the_consumer_runs_the_thunk() {
     let thunk = items_rx.next().now_or_never().unwrap().unwrap();
     assert!(catch_unwind(AssertUnwindSafe(thunk)).is_err());
     assert!(ran.load(Ordering::SeqCst));
+}
+
+#[test]
+fn mapped_route_failure_does_not_close_other_routes() {
+    let mut backend = FakeBackend::default();
+    backend.send_ids.push_back(Ok(101));
+    backend.send_ids.push_back(Ok(102));
+    let mut driver = Driver::new(backend);
+    let (items_tx, mut items_rx) = mpsc::channel(2);
+    let (errors_tx, mut errors_rx) = mpsc::unbounded();
+
+    for request_id in [13, 14] {
+        let (ready_tx, ready_rx) = oneshot::channel();
+        driver.subscribe_mapped::<TestData, u32, _>(
+            request_id,
+            1,
+            DataPeriod::VisualFrame,
+            MappedTarget {
+                tx: items_tx.clone(),
+                errors: errors_tx.clone(),
+                map: |value: TestData| value.0,
+            },
+            ready_tx,
+        );
+        assert_eq!(ready_rx.now_or_never().unwrap().unwrap(), Ok(()));
+    }
+
+    driver.backend.packet(exception_packet(3, 101, 0));
+    driver.backend.packet(data_packet(14, 0, 1, 42));
+    driver.drain_dispatch().unwrap();
+
+    assert!(matches!(
+        errors_rx.next().now_or_never().unwrap(),
+        Some(MappedError::Route(Error::SimConnectException(_)))
+    ));
+    let thunk = items_rx.next().now_or_never().unwrap().unwrap();
+    assert_eq!(thunk(), 42);
 }

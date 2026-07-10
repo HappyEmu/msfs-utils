@@ -313,6 +313,8 @@ pub enum Error {
     IdExhausted,
     /// A client-data definition contains an offset or size outside its Rust type.
     InvalidClientDataDefinition,
+    /// An encoded data value is too large for SimConnect's 32-bit size field.
+    InvalidDataSize,
     /// An operation failed and its best-effort rollback failed as well.
     RollbackFailed {
         /// The error which caused rollback to begin.
@@ -348,6 +350,9 @@ impl fmt::Display for Error {
             Self::IdExhausted => f.write_str("a SimConnect identifier space is exhausted"),
             Self::InvalidClientDataDefinition => {
                 f.write_str("a client-data definition is outside its Rust type layout")
+            }
+            Self::InvalidDataSize => {
+                f.write_str("encoded data is too large for SimConnect's size field")
             }
             Self::RollbackFailed {
                 operation,

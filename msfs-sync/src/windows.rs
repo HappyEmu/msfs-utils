@@ -20,6 +20,9 @@ impl SimConnect {
     }
 
     /// Close the shared native connection and wait for the driver to exit.
+    ///
+    /// This stops the session for every clone of this handle; subsequent
+    /// operations on those clones return [`Error::DriverStopped`].
     pub fn close(self) -> Result<()> {
         futures_executor::block_on(self.inner.close())
     }

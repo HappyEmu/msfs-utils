@@ -35,13 +35,18 @@ pub(crate) fn plan(
     Ok(definitions)
 }
 
-/// Encode declared fields into a zero-initialized buffer, leaving padding zero.
+/// Encode declared fields into a reusable zero-initialized buffer, leaving padding zero.
 ///
 /// # Safety
 ///
 /// Every supplied range must identify initialized bytes of `data`, not padding.
-pub(crate) unsafe fn encode<T>(data: &T, fields: &[FieldDefinition]) -> Result<Vec<u8>> {
-    let mut bytes = vec![0_u8; std::mem::size_of::<T>()];
+pub(crate) unsafe fn encode_into<T>(
+    data: &T,
+    fields: &[FieldDefinition],
+    bytes: &mut Vec<u8>,
+) -> Result<()> {
+    bytes.resize(std::mem::size_of::<T>(), 0);
+    bytes.fill(0);
     let source = std::ptr::from_ref(data).cast::<u8>();
     for (offset, size, _, _) in fields {
         let end = offset
@@ -60,7 +65,7 @@ pub(crate) unsafe fn encode<T>(data: &T, fields: &[FieldDefinition]) -> Result<V
             );
         }
     }
-    Ok(bytes)
+    Ok(())
 }
 
 #[cfg(test)]
@@ -114,11 +119,17 @@ mod tests {
             (0, 1, (-1_i32) as u32, 0.0),
             (std::mem::offset_of!(Padded, word), 4, (-3_i32) as u32, 0.0),
         ];
+        let mut bytes = Vec::new();
         // SAFETY: both ranges are initialized fields of `value`.
-        let bytes = unsafe { encode(&value, &fields) }.unwrap();
+        unsafe { encode_into(&value, &fields, &mut bytes) }.unwrap();
 
         assert_eq!(bytes[0], 7);
         assert_eq!(&bytes[1..4], &[0, 0, 0]);
         assert_eq!(&bytes[4..8], &0x1122_3344_u32.to_ne_bytes());
+
+        let capacity = bytes.capacity();
+        // SAFETY: both ranges are initialized fields of `value`.
+        unsafe { encode_into(&value, &fields, &mut bytes) }.unwrap();
+        assert_eq!(bytes.capacity(), capacity);
     }
 }

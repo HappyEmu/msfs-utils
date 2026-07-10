@@ -74,9 +74,14 @@ impl<T> DeliverySender<T> {
 
 pub(crate) type MappedThunk<E> = Box<dyn FnOnce() -> E + Send + 'static>;
 
+pub(crate) enum MappedError {
+    Route(Error),
+    Session(Error),
+}
+
 pub(crate) struct MappedTarget<E, F> {
     pub tx: mpsc::Sender<MappedThunk<E>>,
-    pub errors: mpsc::UnboundedSender<Error>,
+    pub errors: mpsc::UnboundedSender<MappedError>,
     pub map: F,
 }
 
@@ -112,6 +117,8 @@ pub(crate) struct Driver<B> {
     backend: B,
     definitions: HashMap<TypeId, DefinitionId>,
     client_definitions: HashMap<TypeId, ClientDefinitionId>,
+    client_definition_fields: HashMap<TypeId, Vec<client_layout::FieldDefinition>>,
+    client_encode_buffers: HashMap<TypeId, Vec<u8>>,
     client_data_ids: HashMap<String, ClientDataId>,
     requests: Registry<Box<dyn Route>, ActiveRequest>,
     pub(crate) exception_sinks: Vec<mpsc::UnboundedSender<ServerException>>,
@@ -129,6 +136,8 @@ impl<B: SimConnectBackend> Driver<B> {
             backend,
             definitions: HashMap::new(),
             client_definitions: HashMap::new(),
+            client_definition_fields: HashMap::new(),
+            client_encode_buffers: HashMap::new(),
             client_data_ids: HashMap::new(),
             requests: Registry::new(),
             exception_sinks: Vec::new(),
@@ -456,10 +465,11 @@ impl<B: SimConnectBackend> Driver<B> {
         T: ClientData,
     {
         let type_id = TypeId::of::<T>();
-        let sdk_definitions = client_layout::plan(T::definitions(), std::mem::size_of::<T>())?;
         if let Some(define_id) = self.client_definitions.get(&type_id) {
             return Ok(*define_id);
         }
+        let fields = T::definitions();
+        let sdk_definitions = client_layout::plan(fields.clone(), std::mem::size_of::<T>())?;
 
         let define_id = self.next_client_define_id;
         self.next_client_define_id = self
@@ -484,6 +494,7 @@ impl<B: SimConnectBackend> Driver<B> {
             }
         }
         self.client_definitions.insert(type_id, define_id);
+        self.client_definition_fields.insert(type_id, fields);
         Ok(define_id)
     }
 
@@ -492,9 +503,15 @@ impl<B: SimConnectBackend> Driver<B> {
         T: ClientData,
     {
         let define_id = self.client_define::<T>()?;
+        let type_id = TypeId::of::<T>();
+        let fields = self
+            .client_definition_fields
+            .get(&type_id)
+            .expect("a client definition always retains its validated fields");
+        let bytes = self.client_encode_buffers.entry(type_id).or_default();
         // SAFETY: ClientData requires these ranges to describe initialized fields.
-        let bytes = unsafe { client_layout::encode(data, &T::definitions())? };
-        self.backend.set_client_data(client_id, define_id, &bytes)
+        unsafe { client_layout::encode_into(data, fields, bytes)? };
+        self.backend.set_client_data(client_id, define_id, bytes)
     }
 
     pub(crate) fn subscribe_client_data<T>(
@@ -599,15 +616,10 @@ impl<B: SimConnectBackend> Driver<B> {
                 require_size(packet, DATA_PAYLOAD_OFFSET)?;
                 let request_id = read_u32(packet, 12)?;
                 let define_id = read_u32(packet, 20)?;
-                let define_count = read_u32(packet, 36)?;
-                let data_size = (define_count as usize)
-                    .checked_mul(8)
-                    .and_then(|size| DATA_PAYLOAD_OFFSET.checked_add(size))
-                    .ok_or(Error::InvalidPacket {
-                        expected: usize::MAX,
-                        actual: packet.len(),
-                    })?;
-                require_size(packet, data_size)?;
+                // SDK releases disagree on whether dwDefineCount counts datums
+                // or 8-byte elements. It is not needed for memory safety:
+                // dwSize bounds the packet and each route validates the exact
+                // byte size of its registered Rust type before decoding.
                 let expected = self
                     .requests
                     .active(request_id)
@@ -735,7 +747,8 @@ impl<B: SimConnectBackend> Driver<B> {
     }
 
     pub(crate) fn fail_all(&mut self, error: Error) {
-        self.requests.fail_all(|route| route.fail(error.clone()));
+        self.requests
+            .fail_all(|route| route.fail_session(error.clone()));
     }
 }
 
@@ -766,6 +779,10 @@ trait Route: Send {
     /// Deliver a packet and return whether the route is complete.
     fn deliver(&mut self, packet: &[u8], payload_offset: usize) -> bool;
     fn fail(&mut self, error: Error);
+
+    fn fail_session(&mut self, error: Error) {
+        self.fail(error);
+    }
 
     /// Deliver an assigned object ID and return whether it became orphaned.
     fn assign_object(&mut self, _object_id: ObjectId) -> AssignedObjectAction {
@@ -844,15 +861,14 @@ impl<T: SimData> Route for SubscriptionRoute<T> {
     fn deliver(&mut self, packet: &[u8], payload_offset: usize) -> bool {
         match decode_value(packet, payload_offset) {
             Ok(value) => {
-                if !self.tx.send(value) {
-                    return true;
-                }
-                if let Some(remaining) = &mut self.remaining {
+                let channel_open = self.tx.send(value);
+                let limit_reached = if let Some(remaining) = &mut self.remaining {
                     *remaining -= 1;
                     *remaining == 0
                 } else {
                     false
-                }
+                };
+                !channel_open || limit_reached
             }
             Err(error) => {
                 self.fail(error);
@@ -870,7 +886,7 @@ impl<T: SimData> Route for SubscriptionRoute<T> {
 
 struct MappedSubscriptionRoute<T, E, F> {
     tx: mpsc::Sender<MappedThunk<E>>,
-    errors: mpsc::UnboundedSender<Error>,
+    errors: mpsc::UnboundedSender<MappedError>,
     map: Arc<Mutex<F>>,
     _item: PhantomData<T>,
 }
@@ -903,9 +919,11 @@ where
     }
 
     fn fail(&mut self, error: Error) {
-        let _ = self.errors.unbounded_send(error);
-        self.errors.close_channel();
-        self.tx.close_channel();
+        let _ = self.errors.unbounded_send(MappedError::Route(error));
+    }
+
+    fn fail_session(&mut self, error: Error) {
+        let _ = self.errors.unbounded_send(MappedError::Session(error));
     }
 }
 

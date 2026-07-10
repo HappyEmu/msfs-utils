@@ -32,7 +32,7 @@ mod windows {
         heading: f64,
         #[name = "SIM ON GROUND"]
         #[unit = "Bool"]
-        on_ground: i32,
+        on_ground: i64,
         #[name = "AIRSPEED INDICATED"]
         #[unit = "Knots"]
         airspeed: f64,

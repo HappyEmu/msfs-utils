@@ -52,7 +52,13 @@ impl<T> Receiver<T> {
         if state.closed {
             return Poll::Ready(None);
         }
-        state.waker = Some(cx.waker().clone());
+        if state
+            .waker
+            .as_ref()
+            .is_none_or(|waker| !waker.will_wake(cx.waker()))
+        {
+            state.waker = Some(cx.waker().clone());
+        }
         Poll::Pending
     }
 }
