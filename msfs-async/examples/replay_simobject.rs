@@ -90,7 +90,8 @@ mod windows {
                 exception = exceptions.next() => {
                     return match exception {
                         Some(exception) => Err(Box::new(exception) as Box<dyn std::error::Error>),
-                        None => Err(Box::new(msfs_async::Error::DriverStopped)),
+                        None => Err(Box::new(msfs_async::Error::DriverStopped)
+                            as Box<dyn std::error::Error>),
                     };
                 }
             }
