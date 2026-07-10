@@ -90,10 +90,16 @@ cargo run -p msfs-async --example inspect_wire_layout
 ```
 
 The probe requests `INT32`, `FLOAT64`, and `INT32` in that order. It prints
-`dwSize`, `dwDefineCount`, payload length, raw bytes, packed-offset values, and
-C-aligned-offset values. Preserve that output with the SDK and simulator version
-when resolving the documentation discrepancy. This live probe remains the merge
-gate for confirming scalar packing on the real SimConnect wire.
+the simulator and SimConnect versions, `dwSize`, `dwDefineCount`, payload length,
+raw bytes, packed-offset values, and C-aligned-offset values. Preserve that
+output when checking a new SDK version.
+
+A live Windows/MSFS run on 2026-07-10 returned `dwSize = 56`,
+`dwDefineCount = 3`, and a 16-byte payload. The three values decoded correctly
+at packed offsets 0, 4, and 12. This matches the distributed header: the count
+is the number of datums, and scalar payload fields are packed without C alignment
+padding. The driver remains independent of the disputed count semantics because
+it uses `dwSize` and the registered Rust type size for bounds validation.
 
 ## Examples
 

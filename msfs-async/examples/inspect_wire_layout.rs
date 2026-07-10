@@ -111,6 +111,10 @@ mod windows {
     fn inspect_packet(packet: &[u8]) -> Result<bool, io::Error> {
         let declared_size = read_u32(packet, 0)? as usize;
         let receive_id = read_u32(packet, 8)?;
+        if receive_id == sys::SIMCONNECT_RECV_ID_SIMCONNECT_RECV_ID_OPEN as u32 {
+            inspect_open_packet(packet)?;
+            return Ok(false);
+        }
         if receive_id == sys::SIMCONNECT_RECV_ID_SIMCONNECT_RECV_ID_EXCEPTION as u32 {
             return Err(io::Error::other(format!(
                 "SimConnect exception code {} for send ID {} at argument {}",
@@ -182,6 +186,35 @@ mod windows {
             println!("C-aligned INT32 at offset 16: {}", read_i32(payload, 16)?);
         }
         Ok(true)
+    }
+
+    fn inspect_open_packet(packet: &[u8]) -> Result<(), io::Error> {
+        const APPLICATION_NAME_OFFSET: usize = 12;
+        const APPLICATION_NAME_SIZE: usize = 256;
+        const APPLICATION_VERSION_OFFSET: usize = APPLICATION_NAME_OFFSET + APPLICATION_NAME_SIZE;
+        let name_bytes = packet
+            .get(APPLICATION_NAME_OFFSET..APPLICATION_VERSION_OFFSET)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated open packet"))?;
+        let name_length = name_bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name_bytes.len());
+        let name = String::from_utf8_lossy(&name_bytes[..name_length]);
+        println!(
+            "simulator: {name} {}.{} (build {}.{})",
+            read_u32(packet, APPLICATION_VERSION_OFFSET)?,
+            read_u32(packet, APPLICATION_VERSION_OFFSET + 4)?,
+            read_u32(packet, APPLICATION_VERSION_OFFSET + 8)?,
+            read_u32(packet, APPLICATION_VERSION_OFFSET + 12)?,
+        );
+        println!(
+            "SimConnect: {}.{} (build {}.{})",
+            read_u32(packet, APPLICATION_VERSION_OFFSET + 16)?,
+            read_u32(packet, APPLICATION_VERSION_OFFSET + 20)?,
+            read_u32(packet, APPLICATION_VERSION_OFFSET + 24)?,
+            read_u32(packet, APPLICATION_VERSION_OFFSET + 28)?,
+        );
+        Ok(())
     }
 
     fn read_u32(bytes: &[u8], offset: usize) -> Result<u32, io::Error> {
