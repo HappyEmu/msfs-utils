@@ -71,15 +71,6 @@ struct UserAircraftData {
 #[data_definition]
 #[derive(Debug)]
 struct RemoteAircraftData {
-    #[name = "PLANE LATITUDE"]
-    #[unit = "Degrees"]
-    latitude: f64,
-    #[name = "PLANE LONGITUDE"]
-    #[unit = "Degrees"]
-    longitude: f64,
-    #[name = "PLANE ALTITUDE"]
-    #[unit = "Feet"]
-    altitude: f64,
     #[name = "PLANE HEADING DEGREES TRUE"]
     #[unit = "Degrees"]
     heading: f64,
@@ -230,9 +221,6 @@ impl From<UserAircraftData> for AircraftState {
 impl From<AircraftState> for RemoteAircraftData {
     fn from(state: AircraftState) -> Self {
         Self {
-            latitude: state.latitude,
-            longitude: state.longitude,
-            altitude: state.altitude,
             heading: state.heading,
             pitch: state.pitch,
             bank: state.bank,

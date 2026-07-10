@@ -45,8 +45,8 @@ seconds. The live client shares only the newest local state and remote snapshot,
 so slow SimConnect operations do not build an unbounded queue of stale poses.
 Replay clients preserve the original `fsmp` recording's world and body
 velocities. The SimConnect injector leaves released remote aircraft unfrozen,
-sets their body velocities, and corrects their recorded pose on every update so
-the simulator can move them between network samples.
+sets their recorded attitude and body velocities, and lets the simulator move
+them without subsequent latitude, longitude, or altitude corrections.
 The relay currently encodes one complete snapshot per recipient every 33 ms,
 making its snapshot work quadratic in the number of connected users; it is
 intended for small prototype sessions, not large deployments.
