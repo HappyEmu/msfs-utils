@@ -12,7 +12,7 @@ mod windows {
     pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         let name = CString::new("MSFS WIRE LAYOUT PROBE")?;
         let mut handle: sys::HANDLE = unsafe { std::mem::zeroed() };
-        check(unsafe {
+        check("SimConnect_Open", unsafe {
             sys::SimConnect_Open(
                 &mut handle,
                 name.as_ptr(),
@@ -43,7 +43,7 @@ mod windows {
             sys::SIMCONNECT_DATATYPE_SIMCONNECT_DATATYPE_INT32,
         )?;
 
-        check(unsafe {
+        check("SimConnect_RequestDataOnSimObject", unsafe {
             sys::SimConnect_RequestDataOnSimObject(
                 handle,
                 REQUEST_ID,
@@ -91,9 +91,10 @@ mod windows {
         units: &str,
         datatype: sys::SIMCONNECT_DATATYPE,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        let operation = format!("SimConnect_AddToDataDefinition({name})");
         let name = CString::new(name)?;
         let units = CString::new(units)?;
-        check(unsafe {
+        check(&operation, unsafe {
             sys::SimConnect_AddToDataDefinition(
                 handle,
                 DEFINE_ID,
@@ -203,12 +204,12 @@ mod windows {
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "truncated f64"))
     }
 
-    fn check(result: sys::HRESULT) -> Result<(), io::Error> {
+    fn check(operation: &str, result: sys::HRESULT) -> Result<(), io::Error> {
         if result >= 0 {
             Ok(())
         } else {
             Err(io::Error::other(format!(
-                "SimConnect HRESULT {:#010x}",
+                "{operation} failed with SimConnect HRESULT {:#010x}",
                 result as i32
             )))
         }
