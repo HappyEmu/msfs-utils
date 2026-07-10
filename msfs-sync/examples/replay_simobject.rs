@@ -103,12 +103,12 @@ mod windows {
         let target_id = values.next().ok_or_else(usage_error)?.parse()?;
         let rate_hz = values
             .next()
-            .map(|value| value.parse())
+            .map(|value| value.parse::<f64>())
             .transpose()?
             .unwrap_or(60.0);
         let speed = values
             .next()
-            .map(|value| value.parse())
+            .map(|value| value.parse::<f64>())
             .transpose()?
             .unwrap_or(1.0);
         if values.next().is_some()
